@@ -53,17 +53,12 @@ pub enum HcaError {
 }
 
 /// Channel types for stereo processing
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelType {
+    #[default]
     Discrete,
     StereoPrimary,
     StereoSecondary,
-}
-
-impl Default for ChannelType {
-    fn default() -> Self {
-        ChannelType::Discrete
-    }
 }
 
 /// Channel state for decoding
@@ -168,7 +163,7 @@ fn header_ceil2(a: u32, b: u32) -> u32 {
         return 0;
     }
     let mut result = a / b;
-    if a % b != 0 {
+    if !a.is_multiple_of(b) {
         result += 1;
     }
     result
@@ -578,10 +573,8 @@ impl ClHca {
             if self.min_resolution != 1 || self.max_resolution != 15 {
                 return Err(HcaError::InvalidHeader);
             }
-        } else {
-            if self.min_resolution > self.max_resolution || self.max_resolution > 15 {
-                return Err(HcaError::InvalidHeader);
-            }
+        } else if self.min_resolution > self.max_resolution || self.max_resolution > 15 {
+            return Err(HcaError::InvalidHeader);
         }
 
         Ok(())
@@ -699,10 +692,14 @@ impl ClHca {
             }
         }
 
-        for i in 0..self.channels as usize {
-            self.channel[i].channel_type = channel_types[i];
+        for (i, &ct) in channel_types
+            .iter()
+            .enumerate()
+            .take(self.channels as usize)
+        {
+            self.channel[i].channel_type = ct;
 
-            if channel_types[i] != ChannelType::StereoSecondary {
+            if ct != ChannelType::StereoSecondary {
                 self.channel[i].coded_count =
                     (self.base_band_count + self.stereo_band_count) as usize;
             } else {
@@ -784,8 +781,8 @@ impl ClHca {
     }
 
     fn is_empty_block(&self, data: &[u8]) -> bool {
-        for i in 0x02..(data.len().saturating_sub(0x02)) {
-            if data[i] != 0 {
+        for &byte in &data[0x02..(data.len().saturating_sub(0x02))] {
+            if byte != 0 {
                 return false;
             }
         }
@@ -798,14 +795,14 @@ impl ClHca {
             return -2; // bitreader error
         }
 
-        let byte_start = if bit_pos % 8 != 0 {
+        let byte_start = if !bit_pos.is_multiple_of(8) {
             bit_pos / 8 + 1
         } else {
             bit_pos / 8
         };
 
-        for i in byte_start..(self.frame_size as usize).saturating_sub(0x02) {
-            if data[i] != 0 {
+        for &byte in &data[byte_start..(self.frame_size as usize).saturating_sub(0x02)] {
+            if byte != 0 {
                 return -1;
             }
         }
@@ -821,18 +818,22 @@ impl ClHca {
         let mut blanks = 0;
         let mut channel_blanks = [0i32; HCA_MAX_CHANNELS];
 
-        for ch in 0..self.channels as usize {
+        for (ch, channel_blank) in channel_blanks
+            .iter_mut()
+            .enumerate()
+            .take(self.channels as usize)
+        {
             for sf in 0..HCA_SUBFRAMES {
                 for s in 0..HCA_SAMPLES_PER_SUBFRAME {
                     let fsample = self.channel[ch].wave[sf][s];
 
-                    if fsample > 1.0 || fsample < -1.0 {
+                    if !(-1.0..=1.0).contains(&fsample) {
                         clips += 1;
                     } else {
                         let psample = (fsample * SCALE) as i32;
                         if psample == 0 || psample == -1 {
                             blanks += 1;
-                            channel_blanks[ch] += 1;
+                            *channel_blank += 1;
                         }
                     }
                 }
@@ -860,12 +861,11 @@ impl ClHca {
             return 0;
         }
 
-        if self.channels >= 2 {
-            if channel_blanks[0] == frame_samples as i32
-                && channel_blanks[1] != frame_samples as i32
-            {
-                return 3;
-            }
+        if self.channels >= 2
+            && channel_blanks[0] == frame_samples as i32
+            && channel_blanks[1] != frame_samples as i32
+        {
+            return 3;
         }
 
         1
@@ -966,7 +966,7 @@ impl ClHca {
                 } else {
                     let scalefactor_test =
                         value as i32 + (delta as i32 - (expected_delta >> 1) as i32);
-                    if scalefactor_test < 0 || scalefactor_test >= 64 {
+                    if !(0..64).contains(&scalefactor_test) {
                         return Err(HcaError::UnpackError("invalid scalefactor".into()));
                     }
 
@@ -1042,12 +1042,10 @@ impl ClHca {
                     channel.intensity.fill(7);
                 }
             }
-        } else {
-            if self.version <= HCA_VERSION_200 {
-                let hfr_scales = &mut channel.scale_factors[128 - self.hfr_group_count as usize..];
-                for i in 0..self.hfr_group_count as usize {
-                    hfr_scales[i] = br.read(6) as u8;
-                }
+        } else if self.version <= HCA_VERSION_200 {
+            let hfr_scales = &mut channel.scale_factors[128 - self.hfr_group_count as usize..];
+            for entry in hfr_scales.iter_mut().take(self.hfr_group_count as usize) {
+                *entry = br.read(6) as u8;
             }
         }
 
@@ -1120,15 +1118,14 @@ impl ClHca {
             let bits = MAX_BIT_TABLE[resolution as usize];
             let code = br.read(bits as usize);
 
-            let qc: f32;
-            if resolution > 7 {
+            let qc: f32 = if resolution > 7 {
                 // Sign-magnitude form: sign is bit 0, magnitude is bits 1+
                 let sign = if (code & 1) != 0 { -1i32 } else { 1i32 };
                 let signed_code = sign * (code >> 1) as i32;
                 if signed_code == 0 {
                     br.set_position(br.position() - 1);
                 }
-                qc = signed_code as f32;
+                signed_code as f32
             } else {
                 // Prefix codebooks
                 let index = ((resolution as usize) << 4) + code as usize;
@@ -1138,8 +1135,8 @@ impl ClHca {
                 } else if skip < 0 {
                     br.set_position(br.position().saturating_sub((-skip) as usize));
                 }
-                qc = READ_VAL_TABLE[index];
-            }
+                READ_VAL_TABLE[index]
+            };
 
             channel.spectra[subframe][i] = channel.gain[i] * qc;
         }
@@ -1277,7 +1274,7 @@ impl ClHca {
             return;
         }
 
-        const RATIO: f32 = 0.70710676908493;
+        const RATIO: f32 = 0.707_106_77;
 
         for band in self.base_band_count as usize..self.total_band_count as usize {
             let l = self.channel[ch].spectra[subframe][band];

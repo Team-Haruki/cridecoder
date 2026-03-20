@@ -111,7 +111,7 @@ pub fn align(alignment: u32, offset: u32) -> u32 {
     if alignment == 0 {
         return offset;
     }
-    ((offset + alignment - 1) / alignment) * alignment
+    offset.div_ceil(alignment) * alignment
 }
 
 #[cfg(test)]

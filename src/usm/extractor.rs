@@ -224,14 +224,14 @@ fn get_mask(key: u64) -> (Vec<Vec<u8>>, Vec<u8>) {
     let key1 = (key & 0xFFFFFFFF) as u32;
     let key2 = ((key >> 32) & 0xFFFFFFFF) as u32;
 
-    let mut t = vec![0u8; 0x20];
+    let mut t = [0u8; 0x20];
     t[0x00] = (key1 & 0xFF) as u8;
     t[0x01] = ((key1 >> 8) & 0xFF) as u8;
     t[0x02] = ((key1 >> 16) & 0xFF) as u8;
     t[0x03] = (((key1 >> 24) & 0xFF) as u8).wrapping_sub(0x34);
-    t[0x04] = (((key2 & 0xF) as u8).wrapping_add(0xF9)) & 0xFF;
+    t[0x04] = ((key2 & 0xF) as u8).wrapping_add(0xF9);
     t[0x05] = ((key2 >> 8) & 0xFF) as u8 ^ 0x13;
-    t[0x06] = ((((key2 >> 16) & 0xFF) as u8).wrapping_add(0x61)) & 0xFF;
+    t[0x06] = (((key2 >> 16) & 0xFF) as u8).wrapping_add(0x61);
     t[0x07] = t[0x00] ^ 0xFF;
     t[0x08] = (t[0x02] as u16 + t[0x01] as u16) as u8;
     t[0x09] = (t[0x01] as i16 - t[0x07] as i16) as u8;
@@ -256,7 +256,7 @@ fn get_mask(key: u64) -> (Vec<Vec<u8>>, Vec<u8>) {
     t[0x1C] = (t[0x17] as u16 + 0x44) as u8;
     t[0x1D] = (t[0x03] as u16 + t[0x04] as u16) as u8;
     t[0x1E] = (t[0x05] as i16 - t[0x16] as i16) as u8;
-    t[0x1F] = (t[0x1D] ^ t[0x13]) & 0xFF;
+    t[0x1F] = t[0x1D] ^ t[0x13];
 
     let t2 = b"URUC";
     let mut vmask1 = vec![0u8; 0x20];
@@ -518,12 +518,7 @@ fn extract_usm_chunks<R: Read + Seek>(
     vmask: Option<&Vec<Vec<u8>>>,
     amask: Option<&Vec<u8>>,
 ) -> Result<(), UsmError> {
-    loop {
-        let next_sig = match reader.read_bytes(4) {
-            Ok(sig) => sig,
-            Err(_) => break,
-        };
-
+    while let Ok(next_sig) = reader.read_bytes(4) {
         let block_size = reader.read_u32()?;
         let current_pos = reader.stream_position()?;
         let next_offset = current_pos + block_size as u64;
@@ -562,6 +557,7 @@ fn extract_usm_chunks<R: Read + Seek>(
 }
 
 /// Process a chunk
+#[allow(clippy::too_many_arguments)]
 fn process_chunk<R: Read + Seek>(
     reader: &mut Reader<R>,
     sig: &[u8],

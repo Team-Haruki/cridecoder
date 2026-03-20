@@ -60,9 +60,7 @@ pub fn ath_init_1(ath_curve: &mut [u8; HCA_SAMPLES_PER_SUBFRAME], sample_rate: u
         let index = (acc >> 13) as usize;
 
         if index >= 654 {
-            for j in i..HCA_SAMPLES_PER_SUBFRAME {
-                ath_curve[j] = 0xFF;
-            }
+            ath_curve[i..HCA_SAMPLES_PER_SUBFRAME].fill(0xFF);
             break;
         }
         ath_curve[i] = ATH_BASE_CURVE[index];

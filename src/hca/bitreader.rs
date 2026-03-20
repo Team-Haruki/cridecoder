@@ -80,11 +80,7 @@ impl<'a> BitReader<'a> {
     /// Remaining bits available
     pub fn remaining_bits(&self) -> usize {
         let total_bits = self.data.len() * 8;
-        if self.position >= total_bits {
-            0
-        } else {
-            total_bits - self.position
-        }
+        total_bits.saturating_sub(self.position)
     }
 
     /// Check if there are enough bits remaining

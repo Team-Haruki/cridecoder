@@ -2,8 +2,8 @@
 
 /// Initialize cipher table for type 0 (no encryption)
 pub fn cipher_init_0(cipher_table: &mut [u8; 256]) {
-    for i in 0..256 {
-        cipher_table[i] = i as u8;
+    for (i, entry) in cipher_table.iter_mut().enumerate() {
+        *entry = i as u8;
     }
 }
 
@@ -13,12 +13,12 @@ pub fn cipher_init_1(cipher_table: &mut [u8; 256]) {
     const ADD: u32 = 11;
     let mut v: u32 = 0;
 
-    for i in 1..255 {
+    for entry in cipher_table.iter_mut().take(255).skip(1) {
         v = (v * MUL + ADD) & 0xFF;
         if v == 0 || v == 0xFF {
             v = (v * MUL + ADD) & 0xFF;
         }
-        cipher_table[i] = v as u8;
+        *entry = v as u8;
     }
     cipher_table[0] = 0;
     cipher_table[0xFF] = 0xFF;
@@ -29,9 +29,9 @@ fn cipher_init_56_create_table(r: &mut [u8; 16], key: u8) {
     let add = (key & 0xE) | 1;
     let mut key = key >> 4;
 
-    for i in 0..16 {
+    for entry in r.iter_mut() {
         key = (key.wrapping_mul(mul).wrapping_add(add)) & 0xF;
-        r[i] = key;
+        *entry = key;
     }
 }
 
@@ -45,8 +45,8 @@ pub fn cipher_init_56(cipher_table: &mut [u8; 256], keycode: u64) {
 
     let keycode = if keycode != 0 { keycode - 1 } else { keycode };
 
-    for r in 0..7 {
-        kc[r] = ((keycode >> (r * 8)) & 0xFF) as u8;
+    for (r, entry) in kc.iter_mut().enumerate().take(7) {
+        *entry = ((keycode >> (r * 8)) & 0xFF) as u8;
     }
 
     seed[0x00] = kc[1];

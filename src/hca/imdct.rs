@@ -297,9 +297,7 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
                         ch.temp[d2_idx] = a * cos + b * sin;
                     }
                     d1_idx += 1;
-                    if d2_idx > 0 {
-                        d2_idx -= 1;
-                    }
+                    d2_idx = d2_idx.saturating_sub(1);
                 }
                 s1_idx += count2;
                 s2_idx += count2;

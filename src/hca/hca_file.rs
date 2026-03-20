@@ -7,25 +7,13 @@ pub use super::decoder::HcaInfo;
 use super::decoder::{ClHca, HcaError};
 
 /// Key test parameters for testing HCA decryption keys
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct KeyTest {
     pub key: u64,
     pub subkey: u64,
     pub start_offset: u32,
     pub best_score: i32,
     pub best_key: u64,
-}
-
-impl Default for KeyTest {
-    fn default() -> Self {
-        Self {
-            key: 0,
-            subkey: 0,
-            start_offset: 0,
-            best_score: 0,
-            best_key: 0,
-        }
-    }
 }
 
 // Key testing constants
@@ -286,7 +274,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
 
         let new_offset = offset + self.info.block_size;
 
-        if score < 0 || score > HCA_KEY_MAX_FRAME_SCORE {
+        if !(0..=HCA_KEY_MAX_FRAME_SCORE).contains(&score) {
             return (0, true, new_offset);
         }
 

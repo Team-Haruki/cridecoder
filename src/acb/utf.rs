@@ -125,16 +125,17 @@ impl UtfTable {
         }
 
         // Read header fields (all big-endian)
-        let mut header = UtfHeader::default();
-        header.table_size = buf.read_u32()?;
-        header.version = buf.read_u16()?;
-        header.row_offset = buf.read_u16()?;
-        header.string_table_offset = buf.read_u32()?;
-        header.data_offset = buf.read_u32()?;
-        header.table_name_offset = buf.read_u32()?;
-        header.number_of_fields = buf.read_u16()?;
-        header.row_size = buf.read_u16()?;
-        header.number_of_rows = buf.read_u32()?;
+        let header = UtfHeader {
+            table_size: buf.read_u32()?,
+            version: buf.read_u16()?,
+            row_offset: buf.read_u16()?,
+            string_table_offset: buf.read_u32()?,
+            data_offset: buf.read_u32()?,
+            table_name_offset: buf.read_u32()?,
+            number_of_fields: buf.read_u16()?,
+            row_size: buf.read_u16()?,
+            number_of_rows: buf.read_u32()?,
+        };
 
         // Offsets in the header are relative to byte 8 (after magic + table_size)
         let abs_row_offset = header.row_offset as u32 + 8;
@@ -197,6 +198,7 @@ impl UtfTable {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn parse_schema<R: Read + Seek>(
         buf: &mut Reader<R>,
         header: &UtfHeader,
