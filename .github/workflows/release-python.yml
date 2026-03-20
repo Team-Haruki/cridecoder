@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Extract version from tag (strips 'v' prefix), fallback to 0.0.0 for workflow_dispatch
+  RELEASE_VERSION: ${{ github.event_name == 'release' && github.ref_name || 'v0.0.0' }}
+
 jobs:
   # ──────────────────────────────────────────────
   # Build wheels for Linux (x86_64, aarch64)
@@ -19,6 +23,12 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v5
+      - name: Set version from tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -42,6 +52,12 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v5
+      - name: Set version from tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i '' "1,/^version = .*/{s/^version = .*/version = \"${VERSION}\"/;}" Cargo.toml
+          sed -i '' "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
       - uses: actions/setup-python@v5
         with:
           python-version: |
@@ -72,6 +88,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Set version from tag
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
       - uses: actions/setup-python@v5
         with:
           python-version: |
@@ -102,6 +125,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Set version from tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
