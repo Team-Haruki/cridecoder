@@ -44,7 +44,11 @@ fn extract_acb(acb_path: &str, output_dir: &str) -> PyResult<Option<Vec<String>>
 /// Returns:
 ///     dict with HCA info (sample_rate, channels, block_count, etc.)
 #[pyfunction]
-fn decode_hca<'py>(py: Python<'py>, hca_path: &str, wav_path: &str) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+fn decode_hca<'py>(
+    py: Python<'py>,
+    hca_path: &str,
+    wav_path: &str,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let mut decoder = HcaDecoder::from_file(hca_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to open HCA: {}", e)))?;
 
