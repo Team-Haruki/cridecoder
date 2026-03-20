@@ -22,4 +22,4 @@ classifiers = [
 free-threaded = true
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["python"]
