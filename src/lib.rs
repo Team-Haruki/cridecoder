@@ -5,16 +5,16 @@
 //! - HCA: High Compression Audio codec
 //! - USM: Video container format
 
-pub mod reader;
 pub mod acb;
 pub mod hca;
+pub mod reader;
 pub mod usm;
 
 #[cfg(feature = "python")]
 mod python;
 
 pub use acb::{extract_acb, extract_acb_from_file};
-pub use hca::{HcaDecoder, HcaInfo, HcaDecoderError};
+pub use hca::{HcaDecoder, HcaDecoderError, HcaInfo};
 pub use usm::{extract_usm, extract_usm_file, Metadata, UsmError};
 
 #[cfg(feature = "python")]

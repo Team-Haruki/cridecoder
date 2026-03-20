@@ -70,7 +70,11 @@ pub fn ath_init_1(ath_curve: &mut [u8; HCA_SAMPLES_PER_SUBFRAME], sample_rate: u
 }
 
 /// Initialize ATH curve based on type
-pub fn ath_init(ath_curve: &mut [u8; HCA_SAMPLES_PER_SUBFRAME], ath_type: u32, sample_rate: u32) -> bool {
+pub fn ath_init(
+    ath_curve: &mut [u8; HCA_SAMPLES_PER_SUBFRAME],
+    ath_type: u32,
+    sample_rate: u32,
+) -> bool {
     match ath_type {
         0 => {
             ath_init_0(ath_curve);

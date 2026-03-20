@@ -5,7 +5,7 @@
 /// Bit reader for HCA data
 pub struct BitReader<'a> {
     data: &'a [u8],
-    position: usize,  // Current bit position
+    position: usize, // Current bit position
 }
 
 impl<'a> BitReader<'a> {
@@ -124,7 +124,11 @@ impl<'a> BitReader<'a> {
     /// Used in HCA scale factor decoding
     pub fn read_off_by_one(&mut self, bits: usize) -> u32 {
         let value = self.read(bits);
-        if value != 0 { value + 1 } else { 0 }
+        if value != 0 {
+            value + 1
+        } else {
+            0
+        }
     }
 }
 
@@ -181,8 +185,8 @@ mod tests {
         let data = [0b10110100, 0b01101001];
         let mut reader = BitReader::new(&data);
 
-        assert_eq!(reader.read(1), 1);  // 1
-        assert_eq!(reader.read(1), 0);  // 0
+        assert_eq!(reader.read(1), 1); // 1
+        assert_eq!(reader.read(1), 0); // 0
         assert_eq!(reader.read(2), 0b11); // 11
         assert_eq!(reader.read(4), 0b0100); // 0100
         assert_eq!(reader.read(4), 0b0110); // 0110

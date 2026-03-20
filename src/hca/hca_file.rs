@@ -3,8 +3,8 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-use super::decoder::{ClHca, HcaError};
 pub use super::decoder::HcaInfo;
+use super::decoder::{ClHca, HcaError};
 
 /// Key test parameters for testing HCA decryption keys
 #[derive(Debug, Clone)]
@@ -65,8 +65,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
         let mut header_buf = [0u8; 8];
         reader.read_exact(&mut header_buf)?;
 
-        let header_size = ClHca::is_hca_file(&header_buf)
-            .ok_or(HcaDecoderError::InvalidHeader)?;
+        let header_size = ClHca::is_hca_file(&header_buf).ok_or(HcaDecoderError::InvalidHeader)?;
 
         if header_size > 0x1000 {
             return Err(HcaDecoderError::InvalidHeader);
@@ -129,7 +128,8 @@ impl<R: Read + Seek> HcaDecoder<R> {
             return Err(HcaDecoderError::Eof);
         }
 
-        let offset = self.info.header_size as u64 + self.current_block as u64 * self.info.block_size as u64;
+        let offset =
+            self.info.header_size as u64 + self.current_block as u64 * self.info.block_size as u64;
         self.reader.seek(SeekFrom::Start(offset))?;
         self.reader.read_exact(&mut self.buf)?;
 
@@ -193,7 +193,8 @@ impl<R: Read + Seek> HcaDecoder<R> {
     pub fn seek(&mut self, sample_num: u32) {
         let target_sample = sample_num + self.info.encoder_delay;
         let loop_start_block = target_sample / self.info.samples_per_block as u32;
-        let loop_start_delay = target_sample - (loop_start_block * self.info.samples_per_block as u32);
+        let loop_start_delay =
+            target_sample - (loop_start_block * self.info.samples_per_block as u32);
 
         self.current_block = loop_start_block;
         self.current_delay = loop_start_delay as i32;
@@ -230,7 +231,8 @@ impl<R: Read + Seek> HcaDecoder<R> {
         self.set_encryption_key(kt.key, kt.subkey);
 
         while test_frames < HCA_KEY_MAX_TEST_FRAMES && current_frame < self.info.block_count {
-            let (score, should_break, new_offset) = self.test_single_frame(kt, offset, blank_frames);
+            let (score, should_break, new_offset) =
+                self.test_single_frame(kt, offset, blank_frames);
             offset = new_offset;
 
             if should_break {
@@ -261,7 +263,12 @@ impl<R: Read + Seek> HcaDecoder<R> {
         finalize_score(total_score, test_frames)
     }
 
-    fn test_single_frame(&mut self, kt: &mut KeyTest, offset: u32, _blank_frames: i32) -> (i32, bool, u32) {
+    fn test_single_frame(
+        &mut self,
+        kt: &mut KeyTest,
+        offset: u32,
+        _blank_frames: i32,
+    ) -> (i32, bool, u32) {
         if self.reader.seek(SeekFrom::Start(offset as u64)).is_err() {
             return (-1, false, offset);
         }
@@ -314,7 +321,8 @@ impl<R: Read + Seek> HcaDecoder<R> {
 
         w.write_all(&header)?;
 
-        let mut pcm_buf = vec![0i16; self.info.samples_per_block * self.info.channel_count as usize];
+        let mut pcm_buf =
+            vec![0i16; self.info.samples_per_block * self.info.channel_count as usize];
 
         loop {
             match self.read_packet() {
@@ -425,9 +433,9 @@ mod tests {
     fn test_finalize_score() {
         // Best possible: enough frames, small positive score
         assert_eq!(finalize_score(4, 5), 1); // total_score(4) <= test_frames(5), frames > 3
-        // Not enough frames
+                                             // Not enough frames
         assert_eq!(finalize_score(2, 2), 2); // test_frames(2) <= MIN_TEST_FRAMES(3)
-        // Score too high
+                                             // Score too high
         assert_eq!(finalize_score(100, 5), 100);
         // Negative
         assert_eq!(finalize_score(-1, 5), -1);

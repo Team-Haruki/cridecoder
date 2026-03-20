@@ -19,9 +19,9 @@ pub const COLUMN_TYPE_2BYTE2: u8 = 0x03; // i16
 pub const COLUMN_TYPE_4BYTE: u8 = 0x04; // u32
 pub const COLUMN_TYPE_4BYTE2: u8 = 0x05; // i32
 pub const COLUMN_TYPE_8BYTE: u8 = 0x06; // u64
-// COLUMN_TYPE_8BYTE2 = 0x07; // i64 (unused)
+                                        // COLUMN_TYPE_8BYTE2 = 0x07; // i64 (unused)
 pub const COLUMN_TYPE_FLOAT: u8 = 0x08; // f32
-// COLUMN_TYPE_DOUBLE = 0x09; // f64 (unused)
+                                        // COLUMN_TYPE_DOUBLE = 0x09; // f64 (unused)
 pub const COLUMN_TYPE_STRING: u8 = 0x0A;
 pub const COLUMN_TYPE_DATA: u8 = 0x0B; // variable-length data (offset+size)
 
@@ -57,7 +57,10 @@ mod tests {
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_VAG), ".at3");
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_ATRAC3), ".vag");
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_BCWAV), ".bcwav");
-        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_NINTENDO_DSP), ".dsp");
+        assert_eq!(
+            wave_type_extension(WAVEFORM_ENCODE_TYPE_NINTENDO_DSP),
+            ".dsp"
+        );
     }
 
     #[test]

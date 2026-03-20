@@ -117,7 +117,9 @@ impl<R: Read + Seek> AfsArchive<R> {
 
     /// Get file data for an entry
     pub fn file_data(&mut self, entry: AfsFileEntry) -> Result<Vec<u8>, AfsError> {
-        Ok(self.reader.read_bytes_at(entry.size as usize, entry.offset as u64)?)
+        Ok(self
+            .reader
+            .read_bytes_at(entry.size as usize, entry.offset as u64)?)
     }
 }
 

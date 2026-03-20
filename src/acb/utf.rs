@@ -158,14 +158,23 @@ impl UtfTable {
         }
 
         // Read table name
-        let table_name = buf.read_string0_at(abs_string_offset as u64 + header.table_name_offset as u64)?;
+        let table_name =
+            buf.read_string0_at(abs_string_offset as u64 + header.table_name_offset as u64)?;
 
         // Parse schema
         let (schema, dynamic_keys, constants) =
             Self::parse_schema(&mut buf, &header, abs_string_offset, abs_data_offset)?;
 
         // Read rows
-        let rows = Self::read_rows(&mut buf, &header, &schema, &constants, abs_row_offset, abs_string_offset, abs_data_offset)?;
+        let rows = Self::read_rows(
+            &mut buf,
+            &header,
+            &schema,
+            &constants,
+            abs_row_offset,
+            abs_string_offset,
+            abs_data_offset,
+        )?;
 
         Ok(Self {
             header,
@@ -180,7 +189,9 @@ impl UtfTable {
         match typ {
             COLUMN_TYPE_1BYTE | COLUMN_TYPE_1BYTE2 => Ok(1),
             COLUMN_TYPE_2BYTE | COLUMN_TYPE_2BYTE2 => Ok(2),
-            COLUMN_TYPE_4BYTE | COLUMN_TYPE_4BYTE2 | COLUMN_TYPE_FLOAT | COLUMN_TYPE_STRING => Ok(4),
+            COLUMN_TYPE_4BYTE | COLUMN_TYPE_4BYTE2 | COLUMN_TYPE_FLOAT | COLUMN_TYPE_STRING => {
+                Ok(4)
+            }
             COLUMN_TYPE_8BYTE | COLUMN_TYPE_DATA => Ok(8),
             _ => Err(UtfError::UnknownColumnType(typ)),
         }
@@ -225,8 +236,21 @@ impl UtfTable {
 
             // Handle DEFAULT: data is inline in schema area (constant value for all rows)
             if flag & COLUMN_FLAG_DEFAULT != 0 {
-                let val = Self::read_column_value(buf, typ, header, abs_string_offset, abs_data_offset, true)?;
-                if let Some(v) = Self::resolve_promise_to_value(buf, &val, header, abs_string_offset, abs_data_offset)? {
+                let val = Self::read_column_value(
+                    buf,
+                    typ,
+                    header,
+                    abs_string_offset,
+                    abs_data_offset,
+                    true,
+                )?;
+                if let Some(v) = Self::resolve_promise_to_value(
+                    buf,
+                    &val,
+                    header,
+                    abs_string_offset,
+                    abs_data_offset,
+                )? {
                     constants.insert(name, v);
                 }
             } else if flag & COLUMN_FLAG_ROW != 0 {
@@ -258,7 +282,8 @@ impl UtfTable {
                 if is_constant {
                     Ok(ValueOrPromise::Promise(Promise::Data { offset, size }))
                 } else {
-                    let data = buf.read_bytes_at(size as usize, (abs_data_offset + offset) as u64)?;
+                    let data =
+                        buf.read_bytes_at(size as usize, (abs_data_offset + offset) as u64)?;
                     Ok(ValueOrPromise::Value(Value::Data(data)))
                 }
             }
@@ -334,8 +359,21 @@ impl UtfTable {
                 let field_pos = row_start + col.offset as u64;
                 buf.seek(SeekFrom::Start(field_pos))?;
 
-                let val = Self::read_column_value(buf, col.typ, header, abs_string_offset, abs_data_offset, false)?;
-                if let Some(v) = Self::resolve_promise_to_value(buf, &val, header, abs_string_offset, abs_data_offset)? {
+                let val = Self::read_column_value(
+                    buf,
+                    col.typ,
+                    header,
+                    abs_string_offset,
+                    abs_data_offset,
+                    false,
+                )?;
+                if let Some(v) = Self::resolve_promise_to_value(
+                    buf,
+                    &val,
+                    header,
+                    abs_string_offset,
+                    abs_data_offset,
+                )? {
                     row.insert(col.name.clone(), v);
                 }
             }

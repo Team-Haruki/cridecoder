@@ -90,7 +90,11 @@ pub fn cipher_init_56(cipher_table: &mut [u8; 256], keycode: u64) {
 
 /// Initialize cipher table based on type
 pub fn cipher_init(cipher_table: &mut [u8; 256], ciph_type: u32, keycode: u64) {
-    let ciph_type = if ciph_type == 56 && keycode == 0 { 0 } else { ciph_type };
+    let ciph_type = if ciph_type == 56 && keycode == 0 {
+        0
+    } else {
+        ciph_type
+    };
 
     match ciph_type {
         0 => cipher_init_0(cipher_table),

@@ -31,7 +31,11 @@ fn test_acb_extraction() {
         let p = Path::new(track_path);
         assert!(p.exists(), "Extracted file should exist: {}", track_path);
         let meta = fs::metadata(p).unwrap();
-        assert!(meta.len() > 0, "Extracted file should not be empty: {}", track_path);
+        assert!(
+            meta.len() > 0,
+            "Extracted file should not be empty: {}",
+            track_path
+        );
 
         // Verify HCA signature (first 4 bytes should match HCA magic masked)
         let data = fs::read(p).unwrap();
@@ -76,23 +80,29 @@ fn test_hca_decode_to_wav() {
 
     // Decode the first HCA track
     let hca_path = &tracks[0];
-    let mut decoder = cridecoder::HcaDecoder::from_file(hca_path)
-        .expect("Should open HCA file");
+    let mut decoder = cridecoder::HcaDecoder::from_file(hca_path).expect("Should open HCA file");
 
     let info = decoder.info();
     assert!(info.sampling_rate > 0, "Sample rate should be > 0");
     assert!(info.channel_count > 0, "Channel count should be > 0");
     assert!(info.block_count > 0, "Block count should be > 0");
     assert!(info.block_size > 0, "Block size should be > 0");
-    assert_eq!(info.samples_per_block, 1024, "Samples per block should be 1024");
+    assert_eq!(
+        info.samples_per_block, 1024,
+        "Samples per block should be 1024"
+    );
 
     // Decode to WAV
     let mut wav_buf = Vec::new();
-    decoder.decode_to_wav(&mut wav_buf)
+    decoder
+        .decode_to_wav(&mut wav_buf)
         .expect("Should decode HCA to WAV");
 
     // Verify WAV header
-    assert!(wav_buf.len() > 44, "WAV output should be > 44 bytes (header)");
+    assert!(
+        wav_buf.len() > 44,
+        "WAV output should be > 44 bytes (header)"
+    );
     assert_eq!(&wav_buf[0..4], b"RIFF", "Should start with RIFF magic");
     assert_eq!(&wav_buf[8..12], b"WAVE", "Should have WAVE marker");
     assert_eq!(&wav_buf[12..16], b"fmt ", "Should have fmt chunk");
@@ -140,7 +150,12 @@ fn test_all_hca_export_to_wav() {
             .unwrap_or_else(|e| panic!("Track {} WAV decode failed: {:?}", i, e));
 
         // Verify WAV output
-        assert!(wav_buf.len() > 44, "Track {} WAV too small: {}", i, wav_buf.len());
+        assert!(
+            wav_buf.len() > 44,
+            "Track {} WAV too small: {}",
+            i,
+            wav_buf.len()
+        );
         assert_eq!(&wav_buf[0..4], b"RIFF", "Track {} RIFF magic", i);
         assert_eq!(&wav_buf[8..12], b"WAVE", "Track {} WAVE marker", i);
 
@@ -210,15 +225,24 @@ fn test_hca_decode_all_samples() {
     let samples = decoder.decode_all().expect("Should decode all samples");
 
     // Total samples should be approximately (block_count * samples_per_block - encoder_delay) * channels
-    let expected_total = ((info.block_count * info.samples_per_block as u32) - info.encoder_delay) as usize
+    let expected_total = ((info.block_count * info.samples_per_block as u32) - info.encoder_delay)
+        as usize
         * info.channel_count as usize;
     assert_eq!(samples.len(), expected_total, "Sample count mismatch");
 
     // Verify that samples are in a reasonable range
     let max_val = samples.iter().copied().fold(0.0f32, f32::max);
     let min_val = samples.iter().copied().fold(0.0f32, f32::min);
-    assert!(max_val <= 1.5, "Max sample value should be reasonable: {}", max_val);
-    assert!(min_val >= -1.5, "Min sample value should be reasonable: {}", min_val);
+    assert!(
+        max_val <= 1.5,
+        "Max sample value should be reasonable: {}",
+        max_val
+    );
+    assert!(
+        min_val >= -1.5,
+        "Min sample value should be reasonable: {}",
+        min_val
+    );
 }
 
 /// Test USM extraction works with a real .usm file
@@ -238,14 +262,25 @@ fn test_usm_extraction() {
 
     // Verify extracted video file
     for file_path in &files {
-        assert!(file_path.exists(), "Extracted file should exist: {:?}", file_path);
+        assert!(
+            file_path.exists(),
+            "Extracted file should exist: {:?}",
+            file_path
+        );
         let meta = fs::metadata(file_path).unwrap();
-        assert!(meta.len() > 0, "Extracted file should not be empty: {:?}", file_path);
+        assert!(
+            meta.len() > 0,
+            "Extracted file should not be empty: {:?}",
+            file_path
+        );
     }
 
     // The first file should be an .m2v video
     let video_path = &files[0];
-    let ext = video_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = video_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
     assert_eq!(ext, "m2v", "First extracted file should be .m2v video");
 }
 
@@ -260,7 +295,10 @@ fn test_usm_metadata() {
 
     let result = cridecoder::usm::read_metadata_file(usm_path);
     let metadata = result.expect("USM metadata reading should not error");
-    assert!(!metadata.sections.is_empty(), "Should have metadata sections");
+    assert!(
+        !metadata.sections.is_empty(),
+        "Should have metadata sections"
+    );
 }
 
 /// Test ACB extraction with an invalid file returns None
@@ -360,13 +398,8 @@ fn test_usm_from_memory() {
 
     let data = fs::read(usm_path).unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let result = cridecoder::usm::extract_usm(
-        Cursor::new(data),
-        dir.path(),
-        b"0703.usm",
-        None,
-        false,
-    );
+    let result =
+        cridecoder::usm::extract_usm(Cursor::new(data), dir.path(), b"0703.usm", None, false);
     let files = result.expect("Should extract from in-memory USM data");
     assert!(files.len() > 0, "Should extract at least one file");
 }

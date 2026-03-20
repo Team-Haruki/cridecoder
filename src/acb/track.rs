@@ -71,8 +71,8 @@ fn extract_table_bytes(row: &HashMap<String, Value>) -> Result<HashMap<&str, Vec
 
     // Required tables
     for name in &["CueTable", "CueNameTable", "TrackTable"] {
-        let data = get_bytes_field(row, name)
-            .ok_or_else(|| TrackError::MissingTable(name.to_string()))?;
+        let data =
+            get_bytes_field(row, name).ok_or_else(|| TrackError::MissingTable(name.to_string()))?;
         tables.insert(*name, data.to_vec());
     }
 
@@ -182,13 +182,14 @@ fn extract_sequence_tracks(
     if let Some(seqs) = &tables.seqs {
         let seq = &seqs.rows[ref_index];
         let num_tracks = get_int_field(seq, "NumTracks") as usize;
-        
+
         if let Some(track_index_data) = get_bytes_field(seq, "TrackIndex") {
             for i in 0..num_tracks {
                 if i * 2 + 1 >= track_index_data.len() {
                     break;
                 }
-                let idx = u16::from_be_bytes([track_index_data[i * 2], track_index_data[i * 2 + 1]]) as usize;
+                let idx = u16::from_be_bytes([track_index_data[i * 2], track_index_data[i * 2 + 1]])
+                    as usize;
                 if idx < tables.tras.rows.len() {
                     extract_track_from_track_row(tables, name_map, ref_index as i32, idx, tl);
                 }
@@ -217,7 +218,7 @@ fn extract_track_from_track_row(
 ) {
     let track = &tables.tras.rows[track_idx];
     let event_idx = get_int_field(track, "EventIndex") as usize;
-    
+
     if event_idx == 0xFFFF || event_idx >= tables.tevs.rows.len() {
         return;
     }
@@ -230,7 +231,7 @@ fn extract_track_from_track_row(
         ref_index,
         &tl.tracks,
     );
-    
+
     tl.tracks.extend(tracks);
 }
 
@@ -346,7 +347,13 @@ fn extract_track_from_command(
     };
 
     let base_name = name_map.get(&ref_index).cloned().unwrap_or_default();
-    let name = generate_unique_name(&base_name, ref_index, wav_id, existing_tracks, current_tracks);
+    let name = generate_unique_name(
+        &base_name,
+        ref_index,
+        wav_id,
+        existing_tracks,
+        current_tracks,
+    );
 
     Some(Track {
         cue_id: ref_index,

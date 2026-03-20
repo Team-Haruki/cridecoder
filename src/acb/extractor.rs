@@ -36,10 +36,17 @@ pub fn extract_acb<R: Read + Seek>(
     let mut embedded_awb = load_embedded_awb(&utf.rows[0]);
     let mut external_awbs = load_external_awbs(&utf.rows[0], acb_file_path);
 
-    extract_all_tracks(&track_list, target_dir, &mut embedded_awb, &mut external_awbs)
+    extract_all_tracks(
+        &track_list,
+        target_dir,
+        &mut embedded_awb,
+        &mut external_awbs,
+    )
 }
 
-fn load_embedded_awb(row: &std::collections::HashMap<String, crate::acb::utf::Value>) -> Option<AfsArchive<Cursor<Vec<u8>>>> {
+fn load_embedded_awb(
+    row: &std::collections::HashMap<String, crate::acb::utf::Value>,
+) -> Option<AfsArchive<Cursor<Vec<u8>>>> {
     let awb_data = get_bytes_field(row, "AwbFile")?;
     if awb_data.is_empty() {
         return None;
@@ -103,7 +110,9 @@ fn extract_all_tracks(
     fs::create_dir_all(target_dir)?;
 
     for track in &track_list.tracks {
-        if let Some(output_path) = extract_single_track(track, target_dir, embedded_awb, external_awbs)? {
+        if let Some(output_path) =
+            extract_single_track(track, target_dir, embedded_awb, external_awbs)?
+        {
             outputs.push(output_path);
         }
     }
@@ -157,7 +166,10 @@ fn get_track_data(
 }
 
 /// Convenience function to extract from a file path
-pub fn extract_acb_from_file(acb_path: &Path, target_dir: &Path) -> Result<Option<Vec<String>>, ExtractError> {
+pub fn extract_acb_from_file(
+    acb_path: &Path,
+    target_dir: &Path,
+) -> Result<Option<Vec<String>>, ExtractError> {
     let info = match fs::metadata(acb_path) {
         Ok(i) => i,
         Err(_) => return Ok(None),
@@ -169,7 +181,7 @@ pub fn extract_acb_from_file(acb_path: &Path, target_dir: &Path) -> Result<Optio
     }
 
     let mut file = File::open(acb_path)?;
-    
+
     // Read and validate the first 4 bytes
     let mut header = [0u8; 4];
     use std::io::Read;

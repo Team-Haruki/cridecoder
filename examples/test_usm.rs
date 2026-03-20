@@ -14,7 +14,7 @@ fn main() {
     let usm_file = Path::new(&args[1]);
     let output_dir = Path::new("test_output_usm");
     println!("Testing USM extraction: {:?}", usm_file);
-    
+
     // Use video key None for testing (no encryption)
     match extract_usm_file(usm_file, output_dir, None, false) {
         Ok(files) => {

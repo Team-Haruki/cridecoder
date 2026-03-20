@@ -86,7 +86,9 @@ fn read_column_data<R: Read + Seek>(
         COLUMN_TYPE_STRING => {
             let offset = reader.read_u32()?;
             let current_pos = reader.stream_position()?;
-            reader.seek(SeekFrom::Start((string_table_offset + offset as i64 - 24) as u64))?;
+            reader.seek(SeekFrom::Start(
+                (string_table_offset + offset as i64 - 24) as u64,
+            ))?;
             let s = read_cstring(reader)?;
             reader.seek(SeekFrom::Start(current_pos))?;
             Ok(UtfValue::String(s))
@@ -165,7 +167,9 @@ fn get_utf_table<R: Read + Seek>(reader: &mut Reader<R>) -> Result<UtfTable, Usm
 
         // Read field name
         let current_pos = utf_reader.stream_position()?;
-        utf_reader.seek(SeekFrom::Start((string_table_offset as i64 + name_offset as i64 - 24) as u64))?;
+        utf_reader.seek(SeekFrom::Start(
+            (string_table_offset as i64 + name_offset as i64 - 24) as u64,
+        ))?;
         let field_name_bytes = read_cstring(&mut utf_reader)?;
         let field_name = String::from_utf8_lossy(&field_name_bytes).to_string();
         utf_reader.seek(SeekFrom::Start(current_pos))?;
@@ -332,12 +336,8 @@ pub fn extract_usm<R: Read + Seek>(
     let (filename, has_audio) = parse_usm_header(&mut reader, fallback_name)?;
     let decoded_filename = decode_shift_jis(&filename);
 
-    let (mut video_file, audio_file, output_files) = create_output_files(
-        target_dir,
-        &decoded_filename,
-        has_audio,
-        export_audio,
-    )?;
+    let (mut video_file, audio_file, output_files) =
+        create_output_files(target_dir, &decoded_filename, has_audio, export_audio)?;
 
     let mut audio_file = audio_file;
 
@@ -541,7 +541,8 @@ fn extract_usm_chunks<R: Read + Seek>(
         }
 
         reader.seek(SeekFrom::Current(-13))?;
-        let read_data_len = block_size as usize - chunk_header_size as usize - chunk_footer_size as usize;
+        let read_data_len =
+            block_size as usize - chunk_header_size as usize - chunk_footer_size as usize;
 
         process_chunk(
             reader,

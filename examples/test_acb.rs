@@ -14,7 +14,7 @@ fn main() {
     let acb_file = Path::new(&args[1]);
     let output_dir = Path::new("test_output_acb");
     println!("Testing ACB extraction: {:?}", acb_file);
-    
+
     match extract_acb_from_file(acb_file, output_dir) {
         Ok(Some(tracks)) => {
             println!("Successfully extracted {} tracks", tracks.len());

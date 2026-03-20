@@ -1,12 +1,12 @@
 //! HCA decoder core - header parsing and block decoding
 
-use crate::hca::ath::{ath_init};
+use crate::hca::ath::ath_init;
 use crate::hca::bitreader::BitReader;
 use crate::hca::cipher::{cipher_decrypt, cipher_init};
 use crate::hca::imdct::imdct_transform;
 use crate::hca::tables::{
-    DEQUANTIZER_RANGE_TABLE, DEQUANTIZER_SCALING_TABLE, INTENSITY_RATIO_TABLE,
-    INVERT_TABLE, MAX_BIT_TABLE, READ_BIT_TABLE, READ_VAL_TABLE, SCALE_CONVERSION_TABLE,
+    DEQUANTIZER_RANGE_TABLE, DEQUANTIZER_SCALING_TABLE, INTENSITY_RATIO_TABLE, INVERT_TABLE,
+    MAX_BIT_TABLE, READ_BIT_TABLE, READ_VAL_TABLE, SCALE_CONVERSION_TABLE,
 };
 use thiserror::Error;
 
@@ -131,22 +131,28 @@ pub struct HcaInfo {
 
 /// CRC16 table for HCA
 const CRC16_TABLE: [u16; 256] = [
-    0x0000, 0x8005, 0x800F, 0x000A, 0x801B, 0x001E, 0x0014, 0x8011, 0x8033, 0x0036, 0x003C, 0x8039, 0x0028, 0x802D, 0x8027, 0x0022,
-    0x8063, 0x0066, 0x006C, 0x8069, 0x0078, 0x807D, 0x8077, 0x0072, 0x0050, 0x8055, 0x805F, 0x005A, 0x804B, 0x004E, 0x0044, 0x8041,
-    0x80C3, 0x00C6, 0x00CC, 0x80C9, 0x00D8, 0x80DD, 0x80D7, 0x00D2, 0x00F0, 0x80F5, 0x80FF, 0x00FA, 0x80EB, 0x00EE, 0x00E4, 0x80E1,
-    0x00A0, 0x80A5, 0x80AF, 0x00AA, 0x80BB, 0x00BE, 0x00B4, 0x80B1, 0x8093, 0x0096, 0x009C, 0x8099, 0x0088, 0x808D, 0x8087, 0x0082,
-    0x8183, 0x0186, 0x018C, 0x8189, 0x0198, 0x819D, 0x8197, 0x0192, 0x01B0, 0x81B5, 0x81BF, 0x01BA, 0x81AB, 0x01AE, 0x01A4, 0x81A1,
-    0x01E0, 0x81E5, 0x81EF, 0x01EA, 0x81FB, 0x01FE, 0x01F4, 0x81F1, 0x81D3, 0x01D6, 0x01DC, 0x81D9, 0x01C8, 0x81CD, 0x81C7, 0x01C2,
-    0x0140, 0x8145, 0x814F, 0x014A, 0x815B, 0x015E, 0x0154, 0x8151, 0x8173, 0x0176, 0x017C, 0x8179, 0x0168, 0x816D, 0x8167, 0x0162,
-    0x8123, 0x0126, 0x012C, 0x8129, 0x0138, 0x813D, 0x8137, 0x0132, 0x0110, 0x8115, 0x811F, 0x011A, 0x810B, 0x010E, 0x0104, 0x8101,
-    0x8303, 0x0306, 0x030C, 0x8309, 0x0318, 0x831D, 0x8317, 0x0312, 0x0330, 0x8335, 0x833F, 0x033A, 0x832B, 0x032E, 0x0324, 0x8321,
-    0x0360, 0x8365, 0x836F, 0x036A, 0x837B, 0x037E, 0x0374, 0x8371, 0x8353, 0x0356, 0x035C, 0x8359, 0x0348, 0x834D, 0x8347, 0x0342,
-    0x03C0, 0x83C5, 0x83CF, 0x03CA, 0x83DB, 0x03DE, 0x03D4, 0x83D1, 0x83F3, 0x03F6, 0x03FC, 0x83F9, 0x03E8, 0x83ED, 0x83E7, 0x03E2,
-    0x83A3, 0x03A6, 0x03AC, 0x83A9, 0x03B8, 0x83BD, 0x83B7, 0x03B2, 0x0390, 0x8395, 0x839F, 0x039A, 0x838B, 0x038E, 0x0384, 0x8381,
-    0x0280, 0x8285, 0x828F, 0x028A, 0x829B, 0x029E, 0x0294, 0x8291, 0x82B3, 0x02B6, 0x02BC, 0x82B9, 0x02A8, 0x82AD, 0x82A7, 0x02A2,
-    0x82E3, 0x02E6, 0x02EC, 0x82E9, 0x02F8, 0x82FD, 0x82F7, 0x02F2, 0x02D0, 0x82D5, 0x82DF, 0x02DA, 0x82CB, 0x02CE, 0x02C4, 0x82C1,
-    0x8243, 0x0246, 0x024C, 0x8249, 0x0258, 0x825D, 0x8257, 0x0252, 0x0270, 0x8275, 0x827F, 0x027A, 0x826B, 0x026E, 0x0264, 0x8261,
-    0x0220, 0x8225, 0x822F, 0x022A, 0x823B, 0x023E, 0x0234, 0x8231, 0x8213, 0x0216, 0x021C, 0x8219, 0x0208, 0x820D, 0x8207, 0x0202,
+    0x0000, 0x8005, 0x800F, 0x000A, 0x801B, 0x001E, 0x0014, 0x8011, 0x8033, 0x0036, 0x003C, 0x8039,
+    0x0028, 0x802D, 0x8027, 0x0022, 0x8063, 0x0066, 0x006C, 0x8069, 0x0078, 0x807D, 0x8077, 0x0072,
+    0x0050, 0x8055, 0x805F, 0x005A, 0x804B, 0x004E, 0x0044, 0x8041, 0x80C3, 0x00C6, 0x00CC, 0x80C9,
+    0x00D8, 0x80DD, 0x80D7, 0x00D2, 0x00F0, 0x80F5, 0x80FF, 0x00FA, 0x80EB, 0x00EE, 0x00E4, 0x80E1,
+    0x00A0, 0x80A5, 0x80AF, 0x00AA, 0x80BB, 0x00BE, 0x00B4, 0x80B1, 0x8093, 0x0096, 0x009C, 0x8099,
+    0x0088, 0x808D, 0x8087, 0x0082, 0x8183, 0x0186, 0x018C, 0x8189, 0x0198, 0x819D, 0x8197, 0x0192,
+    0x01B0, 0x81B5, 0x81BF, 0x01BA, 0x81AB, 0x01AE, 0x01A4, 0x81A1, 0x01E0, 0x81E5, 0x81EF, 0x01EA,
+    0x81FB, 0x01FE, 0x01F4, 0x81F1, 0x81D3, 0x01D6, 0x01DC, 0x81D9, 0x01C8, 0x81CD, 0x81C7, 0x01C2,
+    0x0140, 0x8145, 0x814F, 0x014A, 0x815B, 0x015E, 0x0154, 0x8151, 0x8173, 0x0176, 0x017C, 0x8179,
+    0x0168, 0x816D, 0x8167, 0x0162, 0x8123, 0x0126, 0x012C, 0x8129, 0x0138, 0x813D, 0x8137, 0x0132,
+    0x0110, 0x8115, 0x811F, 0x011A, 0x810B, 0x010E, 0x0104, 0x8101, 0x8303, 0x0306, 0x030C, 0x8309,
+    0x0318, 0x831D, 0x8317, 0x0312, 0x0330, 0x8335, 0x833F, 0x033A, 0x832B, 0x032E, 0x0324, 0x8321,
+    0x0360, 0x8365, 0x836F, 0x036A, 0x837B, 0x037E, 0x0374, 0x8371, 0x8353, 0x0356, 0x035C, 0x8359,
+    0x0348, 0x834D, 0x8347, 0x0342, 0x03C0, 0x83C5, 0x83CF, 0x03CA, 0x83DB, 0x03DE, 0x03D4, 0x83D1,
+    0x83F3, 0x03F6, 0x03FC, 0x83F9, 0x03E8, 0x83ED, 0x83E7, 0x03E2, 0x83A3, 0x03A6, 0x03AC, 0x83A9,
+    0x03B8, 0x83BD, 0x83B7, 0x03B2, 0x0390, 0x8395, 0x839F, 0x039A, 0x838B, 0x038E, 0x0384, 0x8381,
+    0x0280, 0x8285, 0x828F, 0x028A, 0x829B, 0x029E, 0x0294, 0x8291, 0x82B3, 0x02B6, 0x02BC, 0x82B9,
+    0x02A8, 0x82AD, 0x82A7, 0x02A2, 0x82E3, 0x02E6, 0x02EC, 0x82E9, 0x02F8, 0x82FD, 0x82F7, 0x02F2,
+    0x02D0, 0x82D5, 0x82DF, 0x02DA, 0x82CB, 0x02CE, 0x02C4, 0x82C1, 0x8243, 0x0246, 0x024C, 0x8249,
+    0x0258, 0x825D, 0x8257, 0x0252, 0x0270, 0x8275, 0x827F, 0x027A, 0x826B, 0x026E, 0x0264, 0x8261,
+    0x0220, 0x8225, 0x822F, 0x022A, 0x823B, 0x023E, 0x0234, 0x8231, 0x8213, 0x0216, 0x021C, 0x8219,
+    0x0208, 0x820D, 0x8207, 0x0202,
 ];
 
 fn crc16_checksum(data: &[u8]) -> u16 {
@@ -292,8 +298,9 @@ impl ClHca {
 
         let mut br = BitReader::new(data);
         let sig = br.peek(32) & HCA_MASK;
-        
-        if sig == 0x48434100 {  // 'HCA\0'
+
+        if sig == 0x48434100 {
+            // 'HCA\0'
             br.skip(32 + 16);
             let header_size = br.read(16) as usize;
             if header_size == 0 {
@@ -362,9 +369,12 @@ impl ClHca {
         self.version = br.read(16);
         self.header_size = br.read(16);
 
-        if self.version != HCA_VERSION_101 && self.version != HCA_VERSION_102 &&
-           self.version != HCA_VERSION_103 && self.version != HCA_VERSION_200 &&
-           self.version != HCA_VERSION_300 {
+        if self.version != HCA_VERSION_101
+            && self.version != HCA_VERSION_102
+            && self.version != HCA_VERSION_103
+            && self.version != HCA_VERSION_200
+            && self.version != HCA_VERSION_300
+        {
             return Err(HcaError::UnsupportedVersion(self.version));
         }
 
@@ -392,7 +402,8 @@ impl ClHca {
     }
 
     fn decode_fmt_chunk(&mut self, br: &mut BitReader) -> Result<(), HcaError> {
-        if (br.peek(32) & HCA_MASK) != 0x666D7400 {  // "fmt\0"
+        if (br.peek(32) & HCA_MASK) != 0x666D7400 {
+            // "fmt\0"
             return Err(HcaError::InvalidHeader);
         }
 
@@ -419,9 +430,11 @@ impl ClHca {
     fn decode_comp_dec_chunk(&mut self, br: &mut BitReader) -> Result<(), HcaError> {
         let chunk_type = br.peek(32) & HCA_MASK;
 
-        if chunk_type == 0x636F6D70 {  // "comp"
+        if chunk_type == 0x636F6D70 {
+            // "comp"
             self.decode_comp_chunk(br)
-        } else if chunk_type == 0x64656300 {  // "dec\0"
+        } else if chunk_type == 0x64656300 {
+            // "dec\0"
             self.decode_dec_chunk(br)
         } else {
             Err(HcaError::InvalidHeader)
@@ -464,7 +477,8 @@ impl ClHca {
     }
 
     fn decode_vbr_chunk(&mut self, br: &mut BitReader) {
-        if (br.peek(32) & HCA_MASK) == 0x76627200 {  // "vbr\0"
+        if (br.peek(32) & HCA_MASK) == 0x76627200 {
+            // "vbr\0"
             br.skip(32);
             self.vbr_max_frame_size = br.read(16);
             self.vbr_noise_level = br.read(16);
@@ -475,7 +489,8 @@ impl ClHca {
     }
 
     fn decode_ath_chunk(&mut self, br: &mut BitReader) {
-        if (br.peek(32) & HCA_MASK) == 0x61746800 {  // "ath\0"
+        if (br.peek(32) & HCA_MASK) == 0x61746800 {
+            // "ath\0"
             br.skip(32);
             self.ath_type = br.read(16);
         } else {
@@ -484,7 +499,8 @@ impl ClHca {
     }
 
     fn decode_loop_chunk(&mut self, br: &mut BitReader) -> Result<(), HcaError> {
-        if (br.peek(32) & HCA_MASK) == 0x6C6F6F70 {  // "loop"
+        if (br.peek(32) & HCA_MASK) == 0x6C6F6F70 {
+            // "loop"
             br.skip(32);
             self.loop_start_frame = br.read(32);
             self.loop_end_frame = br.read(32);
@@ -492,7 +508,9 @@ impl ClHca {
             self.loop_end_padding = br.read(16);
             self.loop_flag = true;
 
-            if !(self.loop_start_frame <= self.loop_end_frame && self.loop_end_frame < self.frame_count) {
+            if !(self.loop_start_frame <= self.loop_end_frame
+                && self.loop_end_frame < self.frame_count)
+            {
                 return Err(HcaError::InvalidHeader);
             }
         } else {
@@ -502,7 +520,8 @@ impl ClHca {
     }
 
     fn decode_cipher_chunk(&mut self, br: &mut BitReader) -> Result<(), HcaError> {
-        if (br.peek(32) & HCA_MASK) == 0x63697068 {  // "ciph"
+        if (br.peek(32) & HCA_MASK) == 0x63697068 {
+            // "ciph"
             br.skip(32);
             self.ciph_type = br.read(16);
 
@@ -516,7 +535,8 @@ impl ClHca {
     }
 
     fn decode_rva_chunk(&mut self, br: &mut BitReader) {
-        if (br.peek(32) & HCA_MASK) == 0x72766100 {  // "rva\0"
+        if (br.peek(32) & HCA_MASK) == 0x72766100 {
+            // "rva\0"
             br.skip(32);
             let rva_int = br.read(32);
             self.rva_volume = f32::from_bits(rva_int);
@@ -526,7 +546,8 @@ impl ClHca {
     }
 
     fn decode_comment_chunk(&mut self, br: &mut BitReader) {
-        if (br.peek(32) & HCA_MASK) == 0x636F6D6D {  // "comm"
+        if (br.peek(32) & HCA_MASK) == 0x636F6D6D {
+            // "comm"
             br.skip(32);
             self.comment_len = br.read(8) as usize;
 
@@ -576,11 +597,12 @@ impl ClHca {
         }
 
         let max = HCA_SAMPLES_PER_SUBFRAME as u32;
-        if self.total_band_count > max ||
-           self.base_band_count > max ||
-           self.stereo_band_count > max ||
-           self.base_band_count + self.stereo_band_count > max ||
-           self.bands_per_hfr_group > max {
+        if self.total_band_count > max
+            || self.base_band_count > max
+            || self.stereo_band_count > max
+            || self.base_band_count + self.stereo_band_count > max
+            || self.bands_per_hfr_group > max
+        {
             return Err(HcaError::InvalidHeader);
         }
 
@@ -681,7 +703,8 @@ impl ClHca {
             self.channel[i].channel_type = channel_types[i];
 
             if channel_types[i] != ChannelType::StereoSecondary {
-                self.channel[i].coded_count = (self.base_band_count + self.stereo_band_count) as usize;
+                self.channel[i].coded_count =
+                    (self.base_band_count + self.stereo_band_count) as usize;
             } else {
                 self.channel[i].coded_count = self.base_band_count as usize;
             }
@@ -819,7 +842,13 @@ impl ClHca {
         self.calculate_score(clips, blanks, &channel_blanks, FRAME_SAMPLES)
     }
 
-    fn calculate_score(&self, mut clips: i32, blanks: i32, channel_blanks: &[i32], frame_samples: usize) -> i32 {
+    fn calculate_score(
+        &self,
+        mut clips: i32,
+        blanks: i32,
+        channel_blanks: &[i32],
+        frame_samples: usize,
+    ) -> i32 {
         if clips == 1 {
             clips += 1;
         }
@@ -832,7 +861,9 @@ impl ClHca {
         }
 
         if self.channels >= 2 {
-            if channel_blanks[0] == frame_samples as i32 && channel_blanks[1] != frame_samples as i32 {
+            if channel_blanks[0] == frame_samples as i32
+                && channel_blanks[1] != frame_samples as i32
+            {
                 return 3;
             }
         }
@@ -871,12 +902,13 @@ impl ClHca {
         cipher_decrypt(&self.cipher_table, &mut data[..self.frame_size as usize]);
 
         // Re-initialize bitreader after decryption
-        let mut br = BitReader::with_offset(data, 2);  // Skip sync word
+        let mut br = BitReader::with_offset(data, 2); // Skip sync word
 
         // Unpack frame values
         let frame_acceptable_noise_level = br.read(9);
         let frame_evaluation_boundary = br.read(7);
-        let packed_noise_level = (frame_acceptable_noise_level << 8).wrapping_sub(frame_evaluation_boundary);
+        let packed_noise_level =
+            (frame_acceptable_noise_level << 8).wrapping_sub(frame_evaluation_boundary);
 
         for ch in 0..self.channels as usize {
             self.unpack_scale_factors(ch, &mut br)?;
@@ -901,9 +933,10 @@ impl ClHca {
 
         let delta_bits = br.read(3) as u8;
 
-        if channel.channel_type == ChannelType::StereoSecondary ||
-           self.hfr_group_count == 0 ||
-           self.version <= HCA_VERSION_200 {
+        if channel.channel_type == ChannelType::StereoSecondary
+            || self.hfr_group_count == 0
+            || self.version <= HCA_VERSION_200
+        {
             extra_count = 0;
         } else {
             extra_count = self.hfr_group_count as usize;
@@ -931,7 +964,8 @@ impl ClHca {
                 if delta == expected_delta {
                     value = br.read(6) as u8;
                 } else {
-                    let scalefactor_test = value as i32 + (delta as i32 - (expected_delta >> 1) as i32);
+                    let scalefactor_test =
+                        value as i32 + (delta as i32 - (expected_delta >> 1) as i32);
                     if scalefactor_test < 0 || scalefactor_test >= 64 {
                         return Err(HcaError::UnpackError("invalid scalefactor".into()));
                     }
@@ -948,7 +982,8 @@ impl ClHca {
 
         // Set derived HFR scales for v3.0
         for i in 0..extra_count {
-            channel.scale_factors[HCA_SAMPLES_PER_SUBFRAME - 1 - i] = channel.scale_factors[cs_count - i];
+            channel.scale_factors[HCA_SAMPLES_PER_SUBFRAME - 1 - i] =
+                channel.scale_factors[cs_count - i];
         }
 
         Ok(())
@@ -1030,7 +1065,8 @@ impl ClHca {
             let mut new_resolution = 0u8;
 
             if scalefactor > 0 {
-                let noise_level = self.ath_curve[i] as i32 + ((packed_noise_level as i32 + i as i32) >> 8);
+                let noise_level =
+                    self.ath_curve[i] as i32 + ((packed_noise_level as i32 + i as i32) >> 8);
                 let curve_position = noise_level + 1 - ((5 * scalefactor as i32) >> 1);
 
                 if curve_position < 0 {
@@ -1152,8 +1188,8 @@ impl ClHca {
         for i in 0..self.channel[ch].noise_count {
             r = r.wrapping_mul(0x343FD).wrapping_add(0x269EC3);
 
-            let random_index = HCA_SAMPLES_PER_SUBFRAME - self.channel[ch].valid_count +
-                (((r & 0x7FFF) as usize * self.channel[ch].valid_count) >> 15);
+            let random_index = HCA_SAMPLES_PER_SUBFRAME - self.channel[ch].valid_count
+                + (((r & 0x7FFF) as usize * self.channel[ch].valid_count) >> 15);
 
             let noise_index = self.channel[ch].noises[i] as usize;
             let valid_index = self.channel[ch].noises[random_index] as usize;
@@ -1199,7 +1235,8 @@ impl ClHca {
                     break;
                 }
 
-                let hfr_scale = self.channel[ch].scale_factors[128 - self.hfr_group_count as usize + group];
+                let hfr_scale =
+                    self.channel[ch].scale_factors[128 - self.hfr_group_count as usize + group];
                 let sf_low = self.channel[ch].scale_factors[lowband as usize];
                 let sc_index = (hfr_scale as i32 - sf_low as i32 + 63).max(0) as usize;
 

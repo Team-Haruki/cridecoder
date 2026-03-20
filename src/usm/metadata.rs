@@ -10,7 +10,7 @@ use encoding_rs::SHIFT_JIS;
 use serde::{Serialize, Serializer};
 use thiserror::Error;
 
-use super::extractor::{UsmError, UtfValue, UtfTable, UtfRow};
+use super::extractor::{UsmError, UtfRow, UtfTable, UtfValue};
 
 /// Metadata for a USM file
 #[derive(Debug, Clone, Serialize)]
@@ -183,7 +183,9 @@ fn read_column_data<R: Read + Seek>(
         COLUMN_TYPE_STRING => {
             let offset = reader.read_u32()?;
             let current_pos = reader.stream_position()?;
-            reader.seek(SeekFrom::Start((string_table_offset + offset as i64 - 24) as u64))?;
+            reader.seek(SeekFrom::Start(
+                (string_table_offset + offset as i64 - 24) as u64,
+            ))?;
             let s = read_cstring(reader)?;
             reader.seek(SeekFrom::Start(current_pos))?;
             Ok(UtfValue::String(s))
@@ -201,7 +203,9 @@ fn read_column_data<R: Read + Seek>(
 }
 
 /// Parse a detailed UTF table from the reader
-fn get_detailed_utf_table<R: Read + Seek>(reader: &mut Reader<R>) -> Result<DetailedUtfTable, MetadataError> {
+fn get_detailed_utf_table<R: Read + Seek>(
+    reader: &mut Reader<R>,
+) -> Result<DetailedUtfTable, MetadataError> {
     let sig = reader.read_bytes(4)?;
     if &sig != b"@UTF" {
         return Err(MetadataError::InvalidUtfSignature);
@@ -221,7 +225,9 @@ fn get_detailed_utf_table<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Deta
     let mut utf_reader = Reader::new(io::Cursor::new(table_data));
 
     // Read table name
-    utf_reader.seek(SeekFrom::Start((string_table_offset as i64 + table_name_offset as i64 - 24) as u64))?;
+    utf_reader.seek(SeekFrom::Start(
+        (string_table_offset as i64 + table_name_offset as i64 - 24) as u64,
+    ))?;
     let table_name_bytes = read_cstring(&mut utf_reader)?;
     let table_name = String::from_utf8_lossy(&table_name_bytes).to_string();
     utf_reader.seek(SeekFrom::Start(0))?;
@@ -237,7 +243,9 @@ fn get_detailed_utf_table<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Deta
 
         // Read field name
         let current_pos = utf_reader.stream_position()?;
-        utf_reader.seek(SeekFrom::Start((string_table_offset as i64 + name_offset as i64 - 24) as u64))?;
+        utf_reader.seek(SeekFrom::Start(
+            (string_table_offset as i64 + name_offset as i64 - 24) as u64,
+        ))?;
         let field_name_bytes = read_cstring(&mut utf_reader)?;
         let field_name = String::from_utf8_lossy(&field_name_bytes).to_string();
         utf_reader.seek(SeekFrom::Start(current_pos))?;
@@ -284,7 +292,10 @@ fn get_detailed_utf_table<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Deta
         rows.push(row);
     }
 
-    Ok(DetailedUtfTable { name: table_name, rows })
+    Ok(DetailedUtfTable {
+        name: table_name,
+        rows,
+    })
 }
 
 /// Read metadata from a USM reader
@@ -300,7 +311,7 @@ pub fn read_metadata<R: Read + Seek>(
     }
 
     let block_size = reader.read_u32()?;
-    
+
     // Read CRID table
     reader.seek(SeekFrom::Start(0x20))?;
     let crid_table = get_detailed_utf_table(&mut reader)?;
@@ -311,11 +322,14 @@ pub fn read_metadata<R: Read + Seek>(
         signature: "CRID".to_string(),
         offset: 0,
         block_size: Some(block_size),
-        data: Some(SectionData::Table(normalize_detailed_utf_table(&crid_table))),
+        data: Some(SectionData::Table(normalize_detailed_utf_table(
+            &crid_table,
+        ))),
     }];
 
     let offset = 8 + block_size as i64;
-    let (has_audio, mut metadata_sections, stream_offset) = read_metadata_sections(&mut reader, offset)?;
+    let (has_audio, mut metadata_sections, stream_offset) =
+        read_metadata_sections(&mut reader, offset)?;
     sections.append(&mut metadata_sections);
 
     Ok(Metadata {
@@ -355,12 +369,14 @@ fn read_metadata_sections<R: Read + Seek>(
     }
 
     // Video header end
-    let (video_header_end, next_offset) = read_marker_section(reader, offset, "@SFV", "video_header_end", "#HEADER END")?;
+    let (video_header_end, next_offset) =
+        read_marker_section(reader, offset, "@SFV", "video_header_end", "#HEADER END")?;
     sections.push(video_header_end);
     offset = next_offset;
 
     if has_audio {
-        let (audio_header_end, next_offset) = read_marker_section(reader, offset, "@SFA", "audio_header_end", "#HEADER END")?;
+        let (audio_header_end, next_offset) =
+            read_marker_section(reader, offset, "@SFA", "audio_header_end", "#HEADER END")?;
         sections.push(audio_header_end);
         offset = next_offset;
     }
@@ -385,7 +401,7 @@ fn read_utf_section<R: Read + Seek>(
 ) -> Result<(MetadataSection, i64), MetadataError> {
     seek_and_check_signature(reader, offset, expected_signature)?;
     let block_size = reader.read_u32()?;
-    
+
     reader.seek(SeekFrom::Start((offset + 0x20) as u64))?;
     let table = get_detailed_utf_table(reader)?;
 
@@ -410,10 +426,10 @@ fn read_marker_section<R: Read + Seek>(
 ) -> Result<(MetadataSection, i64), MetadataError> {
     seek_and_check_signature(reader, offset, expected_signature)?;
     let block_size = reader.read_u32()?;
-    
+
     reader.seek(SeekFrom::Start((offset + 0x20) as u64))?;
     let value = reader.read_bytes(marker.len())?;
-    
+
     if value != marker.as_bytes() {
         return Err(MetadataError::ExpectedMarker(marker.to_string()));
     }
@@ -436,12 +452,12 @@ fn read_metadata_end_section<R: Read + Seek>(
 ) -> Result<(MetadataSection, i64), MetadataError> {
     seek_and_check_signature(reader, offset, "@SFV")?;
     let block_size = reader.read_u32()?;
-    
+
     reader.seek(SeekFrom::Start((offset + 0x20) as u64))?;
-    
+
     let marker = "#METADATA END";
     let value = reader.read_bytes(marker.len())?;
-    
+
     if value != marker.as_bytes() {
         return Err(MetadataError::ExpectedMarker(marker.to_string()));
     }
@@ -600,7 +616,11 @@ fn summarize_binary(data: &[u8]) -> BinarySummary {
     }
 
     let preview_size = data.len().min(PREVIEW_LIMIT);
-    let truncated = if data.len() > PREVIEW_LIMIT { Some(true) } else { None };
+    let truncated = if data.len() > PREVIEW_LIMIT {
+        Some(true)
+    } else {
+        None
+    };
 
     BinarySummary {
         size: data.len(),
@@ -663,9 +683,9 @@ pub fn read_metadata_file(usm_path: &Path) -> Result<Metadata, MetadataError> {
 pub fn export_metadata_file(usm_path: &Path, output_path: &Path) -> Result<(), MetadataError> {
     let metadata = read_metadata_file(usm_path)?;
     let mut output_file = File::create(output_path)?;
-    
+
     let json = serde_json::to_string_pretty(&metadata)?;
     output_file.write_all(json.as_bytes())?;
-    
+
     Ok(())
 }
