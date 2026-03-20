@@ -13,77 +13,56 @@ jobs:
   # Build wheels for Linux (x86_64, aarch64)
   # ──────────────────────────────────────────────
   linux:
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        platform:
-          - runner: ubuntu-latest
-            target: x86_64
-          - runner: ubuntu-latest
-            target: aarch64
-        python:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
-          - "3.14t"
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-          allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.platform.target }}
-          args: --release --out dist
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
           sccache: "true"
           manylinux: auto
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: wheels-linux-${{ matrix.platform.target }}-${{ matrix.python }}
+          name: wheels-linux-${{ matrix.target }}
           path: dist
 
   # ──────────────────────────────────────────────
   # Build wheels for macOS (x86_64, aarch64)
   # ──────────────────────────────────────────────
   macos:
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: macos-15
     strategy:
       matrix:
-        platform:
-          - runner: macos-13
-            target: x86_64
-          - runner: macos-14
-            target: aarch64
-        python:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
-          - "3.14t"
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+            3.14t
           allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.platform.target }}
-          args: --release --out dist
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
           sccache: "true"
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: wheels-macos-${{ matrix.platform.target }}-${{ matrix.python }}
+          name: wheels-macos-${{ matrix.target }}
           path: dist
 
   # ──────────────────────────────────────────────
@@ -91,32 +70,29 @@ jobs:
   # ──────────────────────────────────────────────
   windows:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        python:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
-          - "3.14t"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+            3.14t
           allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist
+          args: --release --out dist --find-interpreter
           sccache: "true"
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: wheels-windows-x64-${{ matrix.python }}
+          name: wheels-windows-x64
           path: dist
 
   # ──────────────────────────────────────────────
@@ -132,7 +108,7 @@ jobs:
           command: sdist
           args: --out dist
       - name: Upload sdist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wheels-sdist
           path: dist
@@ -151,7 +127,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: wheels-*
           merge-multiple: true
