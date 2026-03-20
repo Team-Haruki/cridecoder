@@ -44,30 +44,28 @@ fn extract_acb(acb_path: &str, output_dir: &str) -> PyResult<Option<Vec<String>>
 /// Returns:
 ///     dict with HCA info (sample_rate, channels, block_count, etc.)
 #[pyfunction]
-fn decode_hca(hca_path: &str, wav_path: &str) -> PyResult<PyObject> {
-    Python::with_gil(|py| {
-        let mut decoder = HcaDecoder::from_file(hca_path)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to open HCA: {}", e)))?;
+fn decode_hca<'py>(py: Python<'py>, hca_path: &str, wav_path: &str) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let mut decoder = HcaDecoder::from_file(hca_path)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to open HCA: {}", e)))?;
 
-        let info = decoder.info().clone();
+    let info = decoder.info().clone();
 
-        let mut output = fs::File::create(wav_path)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create WAV: {}", e)))?;
+    let mut output = fs::File::create(wav_path)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create WAV: {}", e)))?;
 
-        decoder
-            .decode_to_wav(&mut output)
-            .map_err(|e| PyRuntimeError::new_err(format!("HCA decode failed: {}", e)))?;
+    decoder
+        .decode_to_wav(&mut output)
+        .map_err(|e| PyRuntimeError::new_err(format!("HCA decode failed: {}", e)))?;
 
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("sample_rate", info.sampling_rate)?;
-        dict.set_item("channels", info.channel_count)?;
-        dict.set_item("block_count", info.block_count)?;
-        dict.set_item("block_size", info.block_size)?;
-        dict.set_item("encoder_delay", info.encoder_delay)?;
-        dict.set_item("samples_per_block", info.samples_per_block)?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("sample_rate", info.sampling_rate)?;
+    dict.set_item("channels", info.channel_count)?;
+    dict.set_item("block_count", info.block_count)?;
+    dict.set_item("block_size", info.block_size)?;
+    dict.set_item("encoder_delay", info.encoder_delay)?;
+    dict.set_item("samples_per_block", info.samples_per_block)?;
 
-        Ok(dict.into())
-    })
+    Ok(dict)
 }
 
 /// Decode HCA data (bytes) to WAV bytes in memory.

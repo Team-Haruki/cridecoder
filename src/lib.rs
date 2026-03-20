@@ -21,7 +21,7 @@ pub use usm::{extract_usm, extract_usm_file, Metadata, UsmError};
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
-#[pymodule(gil_used = false)]
+#[pymodule]
 fn cridecoder(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register(m)
 }
