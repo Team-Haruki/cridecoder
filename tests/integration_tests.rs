@@ -403,3 +403,175 @@ fn test_usm_from_memory() {
     let files = result.expect("Should extract from in-memory USM data");
     assert!(files.len() > 0, "Should extract at least one file");
 }
+
+// =============================================================================
+// Encoder Tests
+// =============================================================================
+
+/// Test HCA encoder with synthetic sine wave
+#[test]
+fn test_hca_encoder_roundtrip() {
+    use cridecoder::{HcaDecoder, HcaEncoder, HcaEncoderConfig};
+
+    // Generate a 1-second stereo sine wave at 44.1kHz
+    let sample_rate = 44100;
+    let channels = 2u32;
+    let duration_secs = 1.0;
+    let sample_count = (sample_rate as f32 * duration_secs) as usize;
+    let freq = 440.0; // A4 note
+
+    let mut samples = Vec::with_capacity(sample_count * channels as usize);
+    for i in 0..sample_count {
+        let t = i as f32 / sample_rate as f32;
+        let sample = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.5;
+        for _ in 0..channels {
+            samples.push(sample);
+        }
+    }
+
+    // Create encoder config
+    let config = HcaEncoderConfig {
+        channels,
+        sample_rate,
+        bitrate: 256_000,
+        ..Default::default()
+    };
+
+    // Encode to HCA
+    let mut encoder = HcaEncoder::new(config).expect("Should create encoder");
+    let mut hca_data = Vec::new();
+    encoder
+        .encode(&samples, &mut Cursor::new(&mut hca_data))
+        .expect("Should encode samples");
+
+    // Verify HCA magic
+    assert_eq!(&hca_data[0..4], b"HCA\x00", "Should have HCA magic");
+
+    // Decode back
+    let mut decoder = HcaDecoder::from_reader(Cursor::new(&hca_data))
+        .expect("Should create decoder from encoded HCA");
+
+    let info = decoder.info();
+    assert_eq!(info.sampling_rate, sample_rate, "Sample rate should match");
+    assert_eq!(info.channel_count as u32, channels, "Channel count should match");
+
+    let decoded = decoder.decode_all().expect("Should decode encoded HCA");
+    assert!(decoded.len() > 0, "Should decode some samples");
+
+    // The decoded length won't exactly match due to HCA frame boundaries and encoder delay
+    // but it should be reasonably close
+    let expected_min = sample_count * channels as usize - 2048 * channels as usize;
+    let expected_max = sample_count * channels as usize + 4096 * channels as usize;
+    assert!(
+        decoded.len() >= expected_min && decoded.len() <= expected_max,
+        "Decoded sample count {} should be close to original {} (range {}-{})",
+        decoded.len(),
+        sample_count * channels as usize,
+        expected_min,
+        expected_max
+    );
+}
+
+/// Test ACB builder creates valid container
+#[test]
+fn test_acb_builder_basic() {
+    use cridecoder::{AcbBuilder, TrackInput};
+
+    // Create a minimal HCA file (just header for testing structure)
+    let dummy_hca = create_minimal_hca_header();
+
+    let input = TrackInput::new("test_track", 0, dummy_hca);
+
+    let mut builder = AcbBuilder::new();
+    builder.add_track(input);
+
+    let mut output = Vec::new();
+    let result = builder.build(&mut Cursor::new(&mut output), None);
+    assert!(result.is_ok(), "ACB build should succeed: {:?}", result.err());
+    assert!(output.len() > 64, "ACB should have content");
+
+    // Verify UTF magic
+    assert_eq!(&output[0..4], b"@UTF", "Should have UTF magic");
+}
+
+/// Test AFS2 archive builder
+#[test]
+fn test_afs_archive_builder() {
+    use cridecoder::AfsArchiveBuilder;
+
+    let file1 = vec![0x48, 0x43, 0x41, 0x00]; // HCA magic
+    let file2 = vec![0x48, 0x43, 0x41, 0x00, 0x01, 0x02];
+
+    let mut builder = AfsArchiveBuilder::new();
+    builder.add_file(0, file1);
+    builder.add_file(1, file2);
+
+    let mut output = Cursor::new(Vec::new());
+    builder.build(&mut output).expect("AFS build should succeed");
+
+    let data = output.into_inner();
+    // Verify AFS2 magic
+    assert_eq!(&data[0..4], b"AFS2", "Should have AFS2 magic");
+}
+
+/// Test USM builder creates valid container
+#[test]
+fn test_usm_builder_structure() {
+    use cridecoder::UsmBuilder;
+
+    // Create minimal M2V header (MPEG-2 sequence header)
+    let video_data = vec![
+        0x00, 0x00, 0x01, 0xB3, // sequence_header_code
+        0x14, 0x00, 0xF0, 0x24, // picture size, aspect, frame rate
+        0xFF, 0xFF, 0xE0, 0x00, // bit rate, vbv buffer
+    ];
+
+    let builder = UsmBuilder::new("test".to_string())
+        .video(video_data);
+
+    let mut output = Cursor::new(Vec::new());
+    let result = builder.build(&mut output);
+    assert!(result.is_ok(), "USM build should succeed: {:?}", result.err());
+
+    let data = output.into_inner();
+    // Verify CRID magic
+    assert_eq!(&data[0..4], b"CRID", "Should have CRID magic");
+}
+
+/// Helper to create a minimal HCA header for testing
+fn create_minimal_hca_header() -> Vec<u8> {
+    let mut data = Vec::new();
+
+    // HCA signature
+    data.extend_from_slice(b"HCA\x00");
+    data.extend_from_slice(&[0x02, 0x00]); // version 2.0
+    data.extend_from_slice(&[0x00, 0x60]); // header size 96
+
+    // fmt chunk
+    data.extend_from_slice(b"fmt\x00");
+    data.extend_from_slice(&[2]); // 2 channels
+    data.extend_from_slice(&[0x00, 0xAC, 0x44]); // 44100 Hz (BE)
+    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]); // 16 blocks
+    data.extend_from_slice(&[0x00, 0x00]); // encoder delay
+    data.extend_from_slice(&[0x00, 0x00]); // insert samples
+
+    // comp chunk
+    data.extend_from_slice(b"comp");
+    data.extend_from_slice(&[0x01, 0x55]); // frame size 341
+    data.extend_from_slice(&[0x00]); // min resolution
+    data.extend_from_slice(&[0x0F]); // max resolution
+    data.extend_from_slice(&[0x01]); // track count
+    data.extend_from_slice(&[0x01]); // channel config
+    data.extend_from_slice(&[0x80]); // total band count
+    data.extend_from_slice(&[0x60]); // base band count
+    data.extend_from_slice(&[0x00]); // stereo band count
+    data.extend_from_slice(&[0x00]); // bands per hfr group
+    data.extend_from_slice(&[0x00, 0x00]); // reserved
+
+    // Pad to header size
+    while data.len() < 96 {
+        data.push(0);
+    }
+
+    data
+}
