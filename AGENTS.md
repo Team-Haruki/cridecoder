@@ -72,3 +72,35 @@ cargo publish --dry-run --allow-dirty
 - Use `encoding_rs` for Shift-JIS text decoding (CRI uses Shift-JIS strings)
 - Public API lives in module root files (`acb.rs`, `hca.rs`, `usm.rs`); internals are `mod` (private)
 - Python bindings are behind `#[cfg(feature = "python")]` so they're opt-in
+
+## Git Commit Format
+
+All commits **must** follow:
+
+```
+[Type] Short description starting with capital letter
+```
+
+| Type      | Usage                                                 |
+|-----------|-------------------------------------------------------|
+| `[Feat]`  | New feature or capability                             |
+| `[Fix]`   | Bug fix                                               |
+| `[Chore]` | Maintenance, refactoring, dependency or build changes |
+| `[Docs]`  | Documentation-only changes                            |
+
+Rules:
+
+- Description starts with a **capital letter**.
+- Imperative mood (`Add ...`, not `Added ...`).
+- No trailing period.
+- Keep subject ≤ ~70 chars.
+- **Agent commits must include a sign-off line**: `Signed-off-by: <agent-name>`
+
+Examples:
+
+```
+[Feat] Add toolbox live snapshot provider
+[Fix] Move user_snapshot config under pjsk_render
+[Chore] Rename config file to haruki-cloud.yaml
+[Docs] Update known-bugs.md with snapshot fix
+```
