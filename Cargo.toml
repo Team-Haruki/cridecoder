@@ -38,3 +38,6 @@ path = "examples/test_acb.rs"
 [[example]]
 name = "test_usm"
 path = "examples/test_usm.rs"
+
+[profile.release]
+lto = "thin"
