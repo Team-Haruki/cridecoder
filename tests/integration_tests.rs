@@ -496,6 +496,14 @@ fn test_acb_builder_basic() {
 
     // Verify UTF magic
     assert_eq!(&output[0..4], b"@UTF", "Should have UTF magic");
+
+    let dir = tempfile::tempdir().unwrap();
+    let extracted = cridecoder::extract_acb(Cursor::new(output), dir.path(), None)
+        .expect("Built ACB should be extractable");
+    assert_eq!(extracted.len(), 1, "Should extract one built track");
+
+    let extracted_data = std::fs::read(&extracted[0]).expect("Should read extracted track");
+    assert_eq!(&extracted_data[0..4], b"HCA\x00");
 }
 
 /// Test AFS2 archive builder

@@ -104,6 +104,7 @@ pub struct UtfTableBuilder {
     pub table_name: String,
     pub columns: Vec<ColumnDef>,
     pub rows: Vec<HashMap<String, Value>>,
+    data_alignment: u32,
 }
 
 impl UtfTableBuilder {
@@ -112,6 +113,7 @@ impl UtfTableBuilder {
             table_name: table_name.into(),
             columns: Vec::new(),
             rows: Vec::new(),
+            data_alignment: 32,
         }
     }
 
@@ -222,17 +224,19 @@ impl UtfTableBuilder {
 
         let rows_size = row_width * self.rows.len() as u32;
 
-        // Offsets (relative to byte 8, after @UTF + table_size)
-        let schema_offset: u32 = 0x18; // After the 0x20 header - 8
+        // Offsets are calculated as absolute table positions. CRI stores them
+        // relative to byte 8, after the @UTF magic and table-size field.
+        let schema_offset: u32 = 0x20;
         let rows_offset = schema_offset + schema_size;
         let strings_offset = rows_offset + rows_size;
-        let data_offset = strings_offset + string_table.len() as u32;
-        let table_size = data_offset + data_table.len() as u32;
+        let unaligned_data_offset = strings_offset + string_table.len() as u32;
+        let data_offset = align_to(unaligned_data_offset, self.data_alignment);
+        let table_size = align_to(data_offset + data_table.len() as u32, self.data_alignment);
 
         // Phase 3: Write header
         writer.write_all(b"@UTF")?;
-        write_u32_be(writer, table_size)?; // table_size (excluding magic and this field)
-        write_u16_be(writer, 0x0001)?; // version
+        write_u32_be(writer, table_size - 8)?; // table_size (excluding magic and this field)
+        writer.write_all(&[0x00, 0x00])?; // unknown byte + Shift-JIS encoding
         write_u16_be(writer, (rows_offset - 8) as u16)?; // rows_offset relative to +8
         write_u32_be(writer, strings_offset - 8)?; // strings_offset relative to +8
         write_u32_be(writer, data_offset - 8)?; // data_offset relative to +8
@@ -271,9 +275,14 @@ impl UtfTableBuilder {
 
         // Phase 6: Write string table
         writer.write_all(string_table.data())?;
+        write_padding(writer, (data_offset - unaligned_data_offset) as usize)?;
 
         // Phase 7: Write data table
         writer.write_all(data_table.data())?;
+        write_padding(
+            writer,
+            (table_size - (data_offset + data_table.len() as u32)) as usize,
+        )?;
 
         Ok(())
     }
@@ -392,6 +401,7 @@ impl DataTable {
 /// Builder for AFS2 (AWB) archives
 pub struct AfsArchiveBuilder {
     alignment: u32,
+    subkey: u16,
     files: Vec<(u32, Vec<u8>)>, // (cue_id, data)
 }
 
@@ -399,6 +409,7 @@ impl AfsArchiveBuilder {
     pub fn new() -> Self {
         Self {
             alignment: 32,
+            subkey: 0,
             files: Vec::new(),
         }
     }
@@ -408,13 +419,14 @@ impl AfsArchiveBuilder {
         self
     }
 
-    pub fn add_file(&mut self, cue_id: u32, data: Vec<u8>) -> &mut Self {
-        self.files.push((cue_id, data));
+    pub fn with_subkey(mut self, subkey: u16) -> Self {
+        self.subkey = subkey;
         self
     }
 
-    fn align_offset(offset: u32, alignment: u32) -> u32 {
-        (offset + alignment - 1) & !(alignment - 1)
+    pub fn add_file(&mut self, cue_id: u32, data: Vec<u8>) -> &mut Self {
+        self.files.push((cue_id, data));
+        self
     }
 
     /// Build the AFS2 archive and write to output
@@ -423,64 +435,89 @@ impl AfsArchiveBuilder {
             return Err(BuilderError::NoTracks);
         }
 
-        let file_count = self.files.len() as u32;
-
-        // AFS2 header structure:
-        // 0x00: "AFS2" magic (4 bytes)
-        // 0x04: version/type (4 bytes) - typically 0x01 0x04 0x02 0x00
-        // 0x08: file count (4 bytes LE)
-        // 0x0C: alignment (4 bytes LE)
-        // 0x10: file IDs (2 bytes each * file_count)
-        // Then: file offset table (4 bytes each * (file_count + 1))
-        // Then: file data (aligned)
-
-        let id_table_size = file_count * 2;
-        let offset_table_size = (file_count + 1) * 4;
-        let header_size = 0x10 + id_table_size + offset_table_size;
-        let data_start = Self::align_offset(header_size, self.alignment);
-
-        // Calculate file offsets
-        let mut file_offsets = Vec::new();
-        let mut current_offset = data_start;
-        for (_, data) in &self.files {
-            file_offsets.push(current_offset);
-            current_offset = Self::align_offset(current_offset + data.len() as u32, self.alignment);
-        }
-        file_offsets.push(current_offset); // End offset
+        let ordered_files = self.ordered_files();
+        let file_count = ordered_files.len() as u32;
+        let id_field_len = self.id_field_len(&ordered_files);
+        let position_field_len = self.position_field_len(id_field_len, &ordered_files);
+        let header_size = 16 + id_field_len * file_count + position_field_len * (file_count + 1);
+        let file_offsets = self.file_offsets(header_size, &ordered_files);
 
         // Write header
         writer.write_all(b"AFS2")?;
-        writer.write_all(&[0x01, 0x04, 0x02, 0x00])?; // Version
+        write_u32_le(
+            writer,
+            (if self.subkey != 0 { 2 } else { 1 })
+                | (position_field_len << 8)
+                | (id_field_len << 16),
+        )?;
         write_u32_le(writer, file_count)?;
-        write_u32_le(writer, self.alignment)?;
+        write_u16_le(writer, self.alignment as u16)?;
+        write_u16_le(writer, self.subkey)?;
 
         // Write file IDs
-        for (cue_id, _) in &self.files {
-            write_u16_le(writer, *cue_id as u16)?;
+        for (cue_id, _) in &ordered_files {
+            write_sized_le(writer, *cue_id as u64, id_field_len)?;
         }
 
         // Write offset table
         for offset in &file_offsets {
-            write_u32_le(writer, *offset)?;
+            write_sized_le(writer, *offset, position_field_len)?;
         }
 
-        // Pad to data start
-        let current_pos = writer.stream_position()? as u32;
-        let padding = data_start - current_pos;
-        writer.write_all(&vec![0u8; padding as usize])?;
-
         // Write file data with alignment padding
-        for (i, (_, data)) in self.files.iter().enumerate() {
+        for (_, data) in &ordered_files {
+            let current_pos = writer.stream_position()? as u32;
+            let aligned_pos = align_to(current_pos, self.alignment);
+            write_padding(writer, (aligned_pos - current_pos) as usize)?;
             writer.write_all(data)?;
-            if i < self.files.len() - 1 {
-                let current_pos = writer.stream_position()? as u32;
-                let next_offset = file_offsets[i + 1];
-                let padding = next_offset - current_pos;
-                writer.write_all(&vec![0u8; padding as usize])?;
-            }
         }
 
         Ok(())
+    }
+
+    fn ordered_files(&self) -> Vec<(u32, Vec<u8>)> {
+        let mut files = self.files.clone();
+        files.sort_by_key(|(cue_id, _)| *cue_id);
+        files
+    }
+
+    fn id_field_len(&self, files: &[(u32, Vec<u8>)]) -> u32 {
+        let max_id = files.iter().map(|(cue_id, _)| *cue_id).max().unwrap_or(0);
+        if files.len() <= u16::MAX as usize && max_id <= u16::MAX as u32 {
+            2
+        } else {
+            4
+        }
+    }
+
+    fn position_field_len(&self, id_field_len: u32, files: &[(u32, Vec<u8>)]) -> u32 {
+        let file_count = files.len() as u32;
+        let header_size = 16 + id_field_len * file_count + 2 * (file_count + 1);
+        let end_offset = self
+            .file_offsets(header_size, files)
+            .last()
+            .copied()
+            .unwrap_or(0);
+
+        if end_offset <= u16::MAX as u64 {
+            2
+        } else {
+            4
+        }
+    }
+
+    fn file_offsets(&self, header_size: u32, files: &[(u32, Vec<u8>)]) -> Vec<u64> {
+        let mut offsets = Vec::with_capacity(files.len() + 1);
+        let mut current_offset = header_size as u64;
+
+        for (_, data) in files {
+            offsets.push(current_offset);
+            current_offset =
+                align_to_u64(current_offset, self.alignment as u64) + data.len() as u64;
+        }
+
+        offsets.push(current_offset);
+        offsets
     }
 }
 
@@ -574,6 +611,22 @@ impl AcbBuilder {
             Value::Data(cue_name_table),
         ));
 
+        // Add Sequence/Track/Event tables
+        let sequence_table = self.build_sequence_table()?;
+        acb_table.add_column(ColumnDef::constant(
+            "SequenceTable",
+            Value::Data(sequence_table),
+        ));
+
+        let track_table = self.build_track_table()?;
+        acb_table.add_column(ColumnDef::constant("TrackTable", Value::Data(track_table)));
+
+        let track_event_table = self.build_track_event_table()?;
+        acb_table.add_column(ColumnDef::constant(
+            "TrackEventTable",
+            Value::Data(track_event_table),
+        ));
+
         // Add Waveform table
         let waveform_table = self.build_waveform_table()?;
         acb_table.add_column(ColumnDef::constant(
@@ -614,7 +667,7 @@ impl AcbBuilder {
         for (i, track) in self.tracks.iter().enumerate() {
             let mut row = HashMap::new();
             row.insert("CueId".to_string(), Value::U32(track.cue_id));
-            row.insert("ReferenceType".to_string(), Value::U8(3)); // Synth reference
+            row.insert("ReferenceType".to_string(), Value::U8(3)); // Sequence reference
             row.insert("ReferenceIndex".to_string(), Value::U16(i as u16));
             table.add_row(row);
         }
@@ -640,6 +693,70 @@ impl AcbBuilder {
         let mut buf = std::io::Cursor::new(Vec::new());
         table.build(&mut buf)?;
         Ok(buf.into_inner())
+    }
+
+    fn build_sequence_table(&self) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("SequenceTable");
+
+        table.add_column(ColumnDef::per_row("NumTracks", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("TrackIndex", COLUMN_TYPE_DATA));
+
+        for i in 0..self.tracks.len() {
+            let mut row = HashMap::new();
+            row.insert("NumTracks".to_string(), Value::U16(1));
+            row.insert(
+                "TrackIndex".to_string(),
+                Value::Data((i as u16).to_be_bytes().to_vec()),
+            );
+            table.add_row(row);
+        }
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        table.build(&mut buf)?;
+        Ok(buf.into_inner())
+    }
+
+    fn build_track_table(&self) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("TrackTable");
+
+        table.add_column(ColumnDef::per_row("EventIndex", COLUMN_TYPE_2BYTE));
+
+        for i in 0..self.tracks.len() {
+            let mut row = HashMap::new();
+            row.insert("EventIndex".to_string(), Value::U16(i as u16));
+            table.add_row(row);
+        }
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        table.build(&mut buf)?;
+        Ok(buf.into_inner())
+    }
+
+    fn build_track_event_table(&self) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("TrackEventTable");
+
+        table.add_column(ColumnDef::per_row("Command", COLUMN_TYPE_DATA));
+
+        for i in 0..self.tracks.len() {
+            let mut row = HashMap::new();
+            row.insert("Command".to_string(), Value::Data(Self::synth_command(i)));
+            table.add_row(row);
+        }
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        table.build(&mut buf)?;
+        Ok(buf.into_inner())
+    }
+
+    fn synth_command(synth_index: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(10);
+        data.extend_from_slice(&0x07d0u16.to_be_bytes());
+        data.push(4);
+        data.extend_from_slice(&2u16.to_be_bytes());
+        data.extend_from_slice(&(synth_index as u16).to_be_bytes());
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.push(0);
+        data
     }
 
     fn build_waveform_table(&self) -> Result<Vec<u8>, BuilderError> {
@@ -753,6 +870,40 @@ fn write_u32_le<W: Write>(w: &mut W, v: u32) -> io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
+fn write_sized_le<W: Write>(w: &mut W, v: u64, size: u32) -> io::Result<()> {
+    match size {
+        2 => write_u16_le(w, v as u16),
+        4 => write_u32_le(w, v as u32),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsupported AFS2 integer size",
+        )),
+    }
+}
+
+fn align_to(offset: u32, alignment: u32) -> u32 {
+    if alignment == 0 {
+        offset
+    } else {
+        offset.div_ceil(alignment) * alignment
+    }
+}
+
+fn align_to_u64(offset: u64, alignment: u64) -> u64 {
+    if alignment == 0 {
+        offset
+    } else {
+        offset.div_ceil(alignment) * alignment
+    }
+}
+
+fn write_padding<W: Write>(w: &mut W, len: usize) -> io::Result<()> {
+    if len > 0 {
+        w.write_all(&vec![0u8; len])?;
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -784,6 +935,17 @@ mod tests {
 
         let data = output.into_inner();
         assert_eq!(&data[0..4], b"AFS2");
+        assert_eq!(&data[4..8], &[0x01, 0x02, 0x02, 0x00]);
+        assert_eq!(&data[12..14], &32u16.to_le_bytes());
+        assert_eq!(&data[14..16], &0u16.to_le_bytes());
+
+        let mut archive = crate::acb::afs::AfsArchive::new(std::io::Cursor::new(data)).unwrap();
+        assert_eq!(archive.alignment, 32);
+        assert_eq!(archive.subkey, 0);
+        assert_eq!(
+            archive.file_data_for_cue_id(1).unwrap(),
+            vec![5, 6, 7, 8, 9]
+        );
     }
 
     #[test]
@@ -801,5 +963,30 @@ mod tests {
 
         let data = output.into_inner();
         assert_eq!(&data[0..4], b"@UTF");
+        assert_eq!(&data[8..10], &[0, 0]);
+
+        let parsed = crate::acb::utf::UtfTable::new(std::io::Cursor::new(data)).unwrap();
+        assert_eq!(parsed.name, "TestTable");
+        assert_eq!(
+            parsed.rows[0].get("Name").and_then(Value::as_string),
+            Some("test")
+        );
+    }
+
+    #[test]
+    fn test_utf_data_pool_alignment() {
+        let mut builder = UtfTableBuilder::new("TestTable");
+        builder.add_column(ColumnDef::constant("Blob", Value::Data(vec![1, 2, 3])));
+        builder.add_row(HashMap::new());
+
+        let mut output = std::io::Cursor::new(Vec::new());
+        builder.build(&mut output).unwrap();
+
+        let data = output.into_inner();
+        let table_size = u32::from_be_bytes(data[4..8].try_into().unwrap()) + 8;
+        let data_offset = u32::from_be_bytes(data[16..20].try_into().unwrap()) + 8;
+
+        assert_eq!(data_offset % 32, 0);
+        assert_eq!(table_size % 32, 0);
     }
 }
