@@ -48,18 +48,19 @@ fn extract_acb(acb_path: &str, output_dir: &str) -> PyResult<Option<Vec<String>>
 #[pyfunction]
 fn build_acb(tracks: Vec<(String, u32, Vec<u8>)>, output_path: &str) -> PyResult<()> {
     let mut builder = AcbBuilder::new();
-    
+
     for (name, cue_id, data) in tracks {
         let track = TrackInput::new(name, cue_id, data);
         builder.add_track(track);
     }
-    
+
     let mut output = fs::File::create(output_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create output file: {}", e)))?;
-    
-    builder.build(&mut output, None)
+
+    builder
+        .build(&mut output, None)
         .map_err(|e| PyRuntimeError::new_err(format!("ACB build failed: {}", e)))?;
-    
+
     Ok(())
 }
 
@@ -73,16 +74,17 @@ fn build_acb(tracks: Vec<(String, u32, Vec<u8>)>, output_path: &str) -> PyResult
 #[pyfunction]
 fn build_acb_bytes(tracks: Vec<(String, u32, Vec<u8>)>) -> PyResult<Vec<u8>> {
     let mut builder = AcbBuilder::new();
-    
+
     for (name, cue_id, data) in tracks {
         let track = TrackInput::new(name, cue_id, data);
         builder.add_track(track);
     }
-    
+
     let mut output = Cursor::new(Vec::new());
-    builder.build(&mut output, None)
+    builder
+        .build(&mut output, None)
         .map_err(|e| PyRuntimeError::new_err(format!("ACB build failed: {}", e)))?;
-    
+
     Ok(output.into_inner())
 }
 
@@ -201,7 +203,7 @@ fn encode_hca_bytes(
         }
 
         pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 {
+        if !chunk_size.is_multiple_of(2) {
             pos += 1; // padding
         }
     }
@@ -253,13 +255,17 @@ fn encode_hca_bytes(
                 })
                 .collect()
         }
-        _ => return Err(PyRuntimeError::new_err(format!("Unsupported bit depth: {}", bits_per_sample))),
+        _ => {
+            return Err(PyRuntimeError::new_err(format!(
+                "Unsupported bit depth: {}",
+                bits_per_sample
+            )))
+        }
     };
 
     // Create encoder config
-    let mut config = HcaEncoderConfig::new(final_sample_rate, final_channels)
-        .with_bitrate(bitrate);
-    
+    let mut config = HcaEncoderConfig::new(final_sample_rate, final_channels).with_bitrate(bitrate);
+
     if let Some(key) = encryption_key {
         config = config.with_encryption(key);
     }
@@ -269,7 +275,8 @@ fn encode_hca_bytes(
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create encoder: {}", e)))?;
 
     let mut output = Cursor::new(Vec::new());
-    encoder.encode(&samples, &mut output)
+    encoder
+        .encode(&samples, &mut output)
         .map_err(|e| PyRuntimeError::new_err(format!("HCA encode failed: {}", e)))?;
 
     Ok(output.into_inner())
@@ -296,16 +303,16 @@ fn encode_hca<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let wav_data = fs::read(wav_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to read WAV: {}", e)))?;
-    
+
     let hca_data = encode_hca_bytes(&wav_data, None, None, bitrate, encryption_key)?;
-    
+
     fs::write(hca_path, &hca_data)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to write HCA: {}", e)))?;
-    
+
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("size", hca_data.len())?;
     dict.set_item("bitrate", bitrate)?;
-    
+
     Ok(dict)
 }
 
@@ -359,19 +366,19 @@ fn build_usm(
     output_path: &str,
     encryption_key: Option<u64>,
 ) -> PyResult<()> {
-    let mut builder = UsmBuilder::new(name.to_string())
-        .video(video_data);
-    
+    let mut builder = UsmBuilder::new(name.to_string()).video(video_data);
+
     if let Some(key) = encryption_key {
         builder = builder.encryption_key(key);
     }
-    
+
     let mut output = fs::File::create(output_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create output file: {}", e)))?;
-    
-    builder.build(&mut output)
+
+    builder
+        .build(&mut output)
         .map_err(|e| PyRuntimeError::new_err(format!("USM build failed: {}", e)))?;
-    
+
     Ok(())
 }
 
@@ -391,17 +398,17 @@ fn build_usm_bytes(
     video_data: Vec<u8>,
     encryption_key: Option<u64>,
 ) -> PyResult<Vec<u8>> {
-    let mut builder = UsmBuilder::new(name.to_string())
-        .video(video_data);
-    
+    let mut builder = UsmBuilder::new(name.to_string()).video(video_data);
+
     if let Some(key) = encryption_key {
         builder = builder.encryption_key(key);
     }
-    
+
     let mut output = Cursor::new(Vec::new());
-    builder.build(&mut output)
+    builder
+        .build(&mut output)
         .map_err(|e| PyRuntimeError::new_err(format!("USM build failed: {}", e)))?;
-    
+
     Ok(output.into_inner())
 }
 
@@ -428,18 +435,18 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_acb, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb_bytes, m)?)?;
-    
+
     // HCA functions
     m.add_function(wrap_pyfunction!(decode_hca, m)?)?;
     m.add_function(wrap_pyfunction!(decode_hca_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(encode_hca, m)?)?;
     m.add_function(wrap_pyfunction!(encode_hca_bytes, m)?)?;
-    
+
     // USM functions
     m.add_function(wrap_pyfunction!(extract_usm, m)?)?;
     m.add_function(wrap_pyfunction!(build_usm, m)?)?;
     m.add_function(wrap_pyfunction!(build_usm_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(read_usm_metadata, m)?)?;
-    
+
     Ok(())
 }

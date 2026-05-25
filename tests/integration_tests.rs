@@ -24,7 +24,7 @@ fn test_acb_extraction() {
 
     let tracks = result.expect("ACB extraction should not error");
     let tracks = tracks.expect("Should find tracks in ACB");
-    assert!(tracks.len() > 0, "Should extract at least one track");
+    assert!(!tracks.is_empty(), "Should extract at least one track");
 
     // Verify extracted files exist and are HCA
     for track_path in &tracks {
@@ -258,7 +258,7 @@ fn test_usm_extraction() {
     let result = cridecoder::extract_usm_file(usm_path, dir.path(), None, false);
 
     let files = result.expect("USM extraction should not error");
-    assert!(files.len() > 0, "Should extract at least one file");
+    assert!(!files.is_empty(), "Should extract at least one file");
 
     // Verify extracted video file
     for file_path in &files {
@@ -401,7 +401,7 @@ fn test_usm_from_memory() {
     let result =
         cridecoder::usm::extract_usm(Cursor::new(data), dir.path(), b"0703.usm", None, false);
     let files = result.expect("Should extract from in-memory USM data");
-    assert!(files.len() > 0, "Should extract at least one file");
+    assert!(!files.is_empty(), "Should extract at least one file");
 }
 
 // =============================================================================
@@ -453,10 +453,10 @@ fn test_hca_encoder_roundtrip() {
 
     let info = decoder.info();
     assert_eq!(info.sampling_rate, sample_rate, "Sample rate should match");
-    assert_eq!(info.channel_count as u32, channels, "Channel count should match");
+    assert_eq!(info.channel_count, channels, "Channel count should match");
 
     let decoded = decoder.decode_all().expect("Should decode encoded HCA");
-    assert!(decoded.len() > 0, "Should decode some samples");
+    assert!(!decoded.is_empty(), "Should decode some samples");
 
     // The decoded length won't exactly match due to HCA frame boundaries and encoder delay
     // but it should be reasonably close
@@ -487,7 +487,11 @@ fn test_acb_builder_basic() {
 
     let mut output = Vec::new();
     let result = builder.build(&mut Cursor::new(&mut output), None);
-    assert!(result.is_ok(), "ACB build should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "ACB build should succeed: {:?}",
+        result.err()
+    );
     assert!(output.len() > 64, "ACB should have content");
 
     // Verify UTF magic
@@ -507,7 +511,9 @@ fn test_afs_archive_builder() {
     builder.add_file(1, file2);
 
     let mut output = Cursor::new(Vec::new());
-    builder.build(&mut output).expect("AFS build should succeed");
+    builder
+        .build(&mut output)
+        .expect("AFS build should succeed");
 
     let data = output.into_inner();
     // Verify AFS2 magic
@@ -526,12 +532,15 @@ fn test_usm_builder_structure() {
         0xFF, 0xFF, 0xE0, 0x00, // bit rate, vbv buffer
     ];
 
-    let builder = UsmBuilder::new("test".to_string())
-        .video(video_data);
+    let builder = UsmBuilder::new("test".to_string()).video(video_data);
 
     let mut output = Cursor::new(Vec::new());
     let result = builder.build(&mut output);
-    assert!(result.is_ok(), "USM build should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "USM build should succeed: {:?}",
+        result.err()
+    );
 
     let data = output.into_inner();
     // Verify CRID magic

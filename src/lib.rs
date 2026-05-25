@@ -18,8 +18,8 @@ pub use acb::{extract_acb, extract_acb_from_file};
 pub use acb::{AcbBuilder, AfsArchiveBuilder, TrackInput, UtfTableBuilder};
 
 // HCA exports
-pub use hca::{HcaDecoder, HcaDecoderError, HcaInfo};
 pub use hca::{encode_wav_to_hca, HcaEncoder, HcaEncoderConfig, HcaEncoderError};
+pub use hca::{HcaDecoder, HcaDecoderError, HcaInfo};
 
 // USM exports
 pub use usm::{extract_usm, extract_usm_file, Metadata, UsmError};

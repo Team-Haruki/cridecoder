@@ -22,8 +22,8 @@ pub struct StreamInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamType {
-    Video,  // M2V MPEG2 video
-    Audio,  // ADX or HCA audio
+    Video, // M2V MPEG2 video
+    Audio, // ADX or HCA audio
 }
 
 /// Builder for USM containers
@@ -99,7 +99,6 @@ impl UsmBuilder {
         writer.write_all(&[0u8; 16])?;
 
         // Write UTF table for CRID
-        let utf_start = writer.stream_position()?;
         self.write_crid_utf_table(writer)?;
         let utf_end = writer.stream_position()?;
 
@@ -145,7 +144,10 @@ impl UsmBuilder {
         let col_name = b"filename\0";
         let filename_null = [filename_bytes, &[0u8]].concat();
 
-        let data_offset = strings_offset + string_table_name.len() as u32 + col_name.len() as u32 + filename_null.len() as u32;
+        let data_offset = strings_offset
+            + string_table_name.len() as u32
+            + col_name.len() as u32
+            + filename_null.len() as u32;
         write_u32_be(writer, data_offset - 8)?; // data_offset
 
         write_u32_be(writer, 0)?; // table_name_offset (points to "CRIUSF_DIR_STREAM")
@@ -198,7 +200,6 @@ impl UsmBuilder {
         writer.write_all(&[0u8; 16])?;
 
         // Write video format UTF table
-        let utf_start = writer.stream_position()?;
         self.write_video_format_utf(writer, video_data)?;
 
         let end_pos = writer.stream_position()?;
@@ -273,7 +274,7 @@ impl UsmBuilder {
     fn write_sfa_header<W: Write + Seek>(
         &self,
         writer: &mut W,
-        audio_data: &[u8],
+        _audio_data: &[u8],
         stream_id: u32,
     ) -> Result<(), UsmBuilderError> {
         // @SFA (Stream Format Audio) chunk
@@ -367,7 +368,7 @@ impl UsmBuilder {
 
         // Write end markers
         self.write_end_marker(writer, b"@SFV")?;
-        for i in 0..self.audio_streams.len() {
+        for _ in 0..self.audio_streams.len() {
             self.write_end_marker(writer, b"@SFA")?;
         }
 
@@ -437,7 +438,11 @@ impl UsmBuilder {
         Ok(())
     }
 
-    fn write_end_marker<W: Write>(&self, writer: &mut W, sig: &[u8]) -> Result<(), UsmBuilderError> {
+    fn write_end_marker<W: Write>(
+        &self,
+        writer: &mut W,
+        _sig: &[u8],
+    ) -> Result<(), UsmBuilderError> {
         writer.write_all(b"@END")?;
         write_u32_be(writer, 0x18)?;
         write_u16_be(writer, 0x0001)?;
@@ -566,8 +571,7 @@ mod tests {
     fn test_usm_builder_basic() {
         let video_data = vec![0u8; 1000];
 
-        let builder = UsmBuilder::new("test_video")
-            .video(video_data);
+        let builder = UsmBuilder::new("test_video").video(video_data);
 
         let mut output = std::io::Cursor::new(Vec::new());
         builder.build(&mut output).unwrap();

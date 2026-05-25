@@ -4,7 +4,7 @@ use crate::acb::consts::*;
 use crate::acb::utf::Value;
 use encoding_rs::SHIFT_JIS;
 use std::collections::HashMap;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Seek, Write};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -557,10 +557,7 @@ impl AcbBuilder {
         acb_table.add_column(ColumnDef::constant("Version", Value::U32(self.acb_version)));
         acb_table.add_column(ColumnDef::constant("Type", Value::U8(0)));
         acb_table.add_column(ColumnDef::constant("Target", Value::U8(0)));
-        acb_table.add_column(ColumnDef::constant(
-            "AcbVolume",
-            Value::F32(1.0),
-        ));
+        acb_table.add_column(ColumnDef::constant("AcbVolume", Value::F32(1.0)));
         acb_table.add_column(ColumnDef::constant(
             "NumCueLimit",
             Value::U16(self.tracks.len() as u16),
@@ -590,10 +587,7 @@ impl AcbBuilder {
 
         // Add AWB (embedded or reference)
         if !self.streaming_awb {
-            acb_table.add_column(ColumnDef::constant(
-                "AwbFile",
-                Value::Data(awb_data),
-            ));
+            acb_table.add_column(ColumnDef::constant("AwbFile", Value::Data(awb_data)));
         } else {
             acb_table.add_column(ColumnDef::constant(
                 "StreamAwbHash",
@@ -667,19 +661,11 @@ impl AcbBuilder {
             );
             row.insert(
                 "MemoryAwbId".to_string(),
-                Value::U16(if self.streaming_awb {
-                    0xFFFF
-                } else {
-                    i as u16
-                }),
+                Value::U16(if self.streaming_awb { 0xFFFF } else { i as u16 }),
             );
             row.insert(
                 "StreamAwbId".to_string(),
-                Value::U16(if self.streaming_awb {
-                    i as u16
-                } else {
-                    0xFFFF
-                }),
+                Value::U16(if self.streaming_awb { i as u16 } else { 0xFFFF }),
             );
             table.add_row(row);
         }
@@ -693,13 +679,19 @@ impl AcbBuilder {
         let mut table = UtfTableBuilder::new("SynthTable");
 
         table.add_column(ColumnDef::per_row("Type", COLUMN_TYPE_1BYTE));
-        table.add_column(ColumnDef::per_row("VoiceLimitGroupName", COLUMN_TYPE_STRING));
+        table.add_column(ColumnDef::per_row(
+            "VoiceLimitGroupName",
+            COLUMN_TYPE_STRING,
+        ));
         table.add_column(ColumnDef::per_row("ReferenceItems", COLUMN_TYPE_DATA));
 
         for i in 0..self.tracks.len() {
             let mut row = HashMap::new();
             row.insert("Type".to_string(), Value::U8(0)); // Single waveform
-            row.insert("VoiceLimitGroupName".to_string(), Value::String(String::new()));
+            row.insert(
+                "VoiceLimitGroupName".to_string(),
+                Value::String(String::new()),
+            );
 
             // ReferenceItems: 2-byte count + 2-byte index pairs
             let ref_items = {

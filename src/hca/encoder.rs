@@ -12,9 +12,7 @@ use super::decoder::{
     crc16_checksum, HCA_MAX_CHANNELS, HCA_SAMPLES_PER_FRAME, HCA_SAMPLES_PER_SUBFRAME,
     HCA_SUBFRAMES, HCA_VERSION_200,
 };
-use super::tables::{
-    DEQUANTIZER_RANGE_TABLE, DEQUANTIZER_SCALING_TABLE, INVERT_TABLE, MAX_BIT_TABLE,
-};
+use super::tables::{DEQUANTIZER_RANGE_TABLE, DEQUANTIZER_SCALING_TABLE, MAX_BIT_TABLE};
 use std::f32::consts::PI;
 use std::io::{self, Seek, Write};
 use thiserror::Error;
@@ -84,15 +82,13 @@ pub struct HcaEncoder {
     total_band_count: u32,
     base_band_count: u32,
     stereo_band_count: u32,
-    
+
     // MDCT state
     mdct_window: [f32; HCA_SAMPLES_PER_SUBFRAME],
-    mdct_sin_table: [f32; HCA_SAMPLES_PER_SUBFRAME],
-    mdct_cos_table: [f32; HCA_SAMPLES_PER_SUBFRAME],
-    
+
     // Overlap buffer for MDCT
     overlap_buffer: Vec<[f32; HCA_SAMPLES_PER_SUBFRAME]>,
-    
+
     // Cipher table for encryption
     cipher_table: [u8; 256],
 }
@@ -117,15 +113,15 @@ impl HcaEncoder {
         let stereo_band_count = 0u32; // No intensity stereo
 
         // Initialize MDCT tables
-        let (mdct_window, mdct_sin_table, mdct_cos_table) = Self::init_mdct_tables();
+        let mdct_window = Self::init_mdct_window();
 
         // Initialize cipher table
         let mut cipher_table = [0u8; 256];
         if let Some(key) = config.encryption_key {
             cipher_init(&mut cipher_table, 56, key);
         } else {
-            for i in 0..256 {
-                cipher_table[i] = i as u8;
+            for (i, byte) in cipher_table.iter_mut().enumerate() {
+                *byte = i as u8;
             }
         }
 
@@ -139,8 +135,6 @@ impl HcaEncoder {
             base_band_count,
             stereo_band_count,
             mdct_window,
-            mdct_sin_table,
-            mdct_cos_table,
             overlap_buffer,
             cipher_table,
         })
@@ -152,28 +146,17 @@ impl HcaEncoder {
         (size as u32).clamp(0x100, 0x1000)
     }
 
-    fn init_mdct_tables() -> (
-        [f32; HCA_SAMPLES_PER_SUBFRAME],
-        [f32; HCA_SAMPLES_PER_SUBFRAME],
-        [f32; HCA_SAMPLES_PER_SUBFRAME],
-    ) {
+    fn init_mdct_window() -> [f32; HCA_SAMPLES_PER_SUBFRAME] {
         let mut window = [0.0f32; HCA_SAMPLES_PER_SUBFRAME];
-        let mut sin_table = [0.0f32; HCA_SAMPLES_PER_SUBFRAME];
-        let mut cos_table = [0.0f32; HCA_SAMPLES_PER_SUBFRAME];
 
         let n = HCA_SAMPLES_PER_SUBFRAME as f32;
-        for i in 0..HCA_SAMPLES_PER_SUBFRAME {
+        for (i, value) in window.iter_mut().enumerate() {
             // KBD-like window
             let x = (i as f32 + 0.5) / n;
-            window[i] = (PI * x).sin().sqrt();
-
-            // MDCT rotation
-            let angle = PI * (i as f32 + 0.5) / n;
-            sin_table[i] = angle.sin();
-            cos_table[i] = angle.cos();
+            *value = (PI * x).sin().sqrt();
         }
 
-        (window, sin_table, cos_table)
+        window
     }
 
     /// Encode PCM samples to HCA format
@@ -188,10 +171,10 @@ impl HcaEncoder {
 
         let channels = self.config.channels as usize;
         let frame_samples = HCA_SAMPLES_PER_FRAME * channels;
-        let frame_count = (samples.len() + frame_samples - 1) / frame_samples;
+        let frame_count = samples.len().div_ceil(frame_samples);
 
         // Write HCA header
-        let header_size = self.write_header(writer, frame_count as u32)?;
+        self.write_header(writer, frame_count as u32)?;
 
         // Encode frames
         for frame_idx in 0..frame_count {
@@ -245,7 +228,7 @@ impl HcaEncoder {
 
         // comp chunk
         let comp_magic = if self.config.encryption_key.is_some() {
-            0xE3EFEDf0u32
+            0xE3EFEDF0u32
         } else {
             0x636F6D70u32 // "comp"
         };
@@ -321,16 +304,17 @@ impl HcaEncoder {
         let mut frame_data = vec![0u8; self.frame_size as usize];
 
         // Process each channel
-        let mut channel_spectra = vec![[[0.0f32; HCA_SAMPLES_PER_SUBFRAME]; HCA_SUBFRAMES]; channels];
+        let mut channel_spectra =
+            vec![[[0.0f32; HCA_SAMPLES_PER_SUBFRAME]; HCA_SUBFRAMES]; channels];
         let mut channel_scale_factors = vec![[0u8; HCA_SAMPLES_PER_SUBFRAME]; channels];
         let mut channel_resolutions = vec![[0u8; HCA_SAMPLES_PER_SUBFRAME]; channels];
 
         for ch in 0..channels {
             // Extract channel samples
             let mut channel_samples = [0.0f32; HCA_SAMPLES_PER_FRAME];
-            for i in 0..HCA_SAMPLES_PER_FRAME {
+            for (i, sample) in channel_samples.iter_mut().enumerate() {
                 let idx = i * channels + ch;
-                channel_samples[i] = if idx < samples.len() {
+                *sample = if idx < samples.len() {
                     samples[idx]
                 } else {
                     0.0
@@ -338,16 +322,12 @@ impl HcaEncoder {
             }
 
             // Apply MDCT to each subframe
-            for sf in 0..HCA_SUBFRAMES {
+            for (sf, spectra) in channel_spectra[ch].iter_mut().enumerate() {
                 let start = sf * HCA_SAMPLES_PER_SUBFRAME;
                 let end = start + HCA_SAMPLES_PER_SUBFRAME;
                 let subframe_samples = &channel_samples[start..end];
 
-                self.mdct_transform(
-                    ch,
-                    subframe_samples,
-                    &mut channel_spectra[ch][sf],
-                );
+                self.mdct_transform(ch, subframe_samples, spectra);
             }
 
             // Quantize spectra
@@ -371,20 +351,16 @@ impl HcaEncoder {
         writer_bits.write(evaluation_boundary, 7);
 
         // Write channel data (scale factors, intensity, resolutions for each channel)
-        for ch in 0..channels {
-            self.encode_channel_header(
-                &mut writer_bits,
-                &channel_scale_factors[ch],
-                ch,
-            );
+        for (ch, scale_factors) in channel_scale_factors.iter().enumerate().take(channels) {
+            self.encode_channel_header(&mut writer_bits, scale_factors, ch);
         }
 
         // Write spectra for each subframe
         for sf in 0..HCA_SUBFRAMES {
-            for ch in 0..channels {
+            for (ch, spectra) in channel_spectra.iter().enumerate().take(channels) {
                 self.encode_subframe_spectra(
                     &mut writer_bits,
-                    &channel_spectra[ch][sf],
+                    &spectra[sf],
                     &channel_scale_factors[ch],
                     &channel_resolutions[ch],
                     self.base_band_count as usize,
@@ -422,35 +398,33 @@ impl HcaEncoder {
         output: &mut [f32; HCA_SAMPLES_PER_SUBFRAME],
     ) {
         let n = HCA_SAMPLES_PER_SUBFRAME;
-        let half_n = n / 2;
 
         // Combine current input with previous overlap
         let mut windowed = [0.0f32; HCA_SAMPLES_PER_SUBFRAME * 2];
-        
+
         // Previous samples (from overlap buffer) with analysis window
-        for i in 0..n {
-            windowed[i] = self.overlap_buffer[channel][i] * self.mdct_window[i];
+        for (i, sample) in windowed.iter_mut().take(n).enumerate() {
+            *sample = self.overlap_buffer[channel][i] * self.mdct_window[i];
         }
-        
+
         // Current samples with analysis window (second half)
-        for i in 0..n {
-            windowed[n + i] = input[i] * self.mdct_window[n - 1 - i];
+        for (i, sample) in windowed.iter_mut().skip(n).take(n).enumerate() {
+            *sample = input[i] * self.mdct_window[n - 1 - i];
         }
 
         // Update overlap buffer
-        for i in 0..n {
-            self.overlap_buffer[channel][i] = input[i];
-        }
+        self.overlap_buffer[channel][..n].copy_from_slice(&input[..n]);
 
         // MDCT core: DCT-IV of windowed data
         // X[k] = sum_{n=0}^{N-1} x[n] * cos(pi/N * (n + 0.5 + N/2) * (k + 0.5))
-        for k in 0..n {
+        for (k, value) in output.iter_mut().enumerate().take(n) {
             let mut sum = 0.0f32;
-            for i in 0..(n * 2) {
-                let angle = PI / (n as f32) * ((i as f32) + 0.5 + (n as f32) / 2.0) * ((k as f32) + 0.5);
-                sum += windowed[i] * angle.cos();
+            for (i, windowed_sample) in windowed.iter().enumerate().take(n * 2) {
+                let angle =
+                    PI / (n as f32) * ((i as f32) + 0.5 + (n as f32) / 2.0) * ((k as f32) + 0.5);
+                sum += *windowed_sample * angle.cos();
             }
-            output[k] = sum * (2.0 / n as f32).sqrt();
+            *value = sum * (2.0 / n as f32).sqrt();
         }
     }
 
@@ -463,9 +437,9 @@ impl HcaEncoder {
     ) {
         // Find maximum absolute value per band across all subframes
         let mut max_values = [0.0f32; HCA_SAMPLES_PER_SUBFRAME];
-        for sf in 0..HCA_SUBFRAMES {
+        for subframe in spectra.iter().take(HCA_SUBFRAMES) {
             for i in 0..HCA_SAMPLES_PER_SUBFRAME {
-                let abs_val = spectra[sf][i].abs();
+                let abs_val = subframe[i].abs();
                 if abs_val > max_values[i] {
                     max_values[i] = abs_val;
                 }
@@ -475,7 +449,7 @@ impl HcaEncoder {
         // Determine scale factors and resolutions
         for i in 0..HCA_SAMPLES_PER_SUBFRAME {
             let max_val = max_values[i];
-            
+
             if max_val < 1e-10 {
                 // Silent band
                 scale_factors[i] = 0;
@@ -488,16 +462,16 @@ impl HcaEncoder {
 
                 for sf in 1..64u8 {
                     let sf_scale = DEQUANTIZER_SCALING_TABLE[sf as usize];
-                    
+
                     for res in 1..16u8 {
                         let res_scale = DEQUANTIZER_RANGE_TABLE[res as usize];
                         let gain = sf_scale * res_scale;
-                        
+
                         // Check if this gain can represent the value
                         if gain > 0.0 {
                             let quantized = max_val / gain;
                             let max_quant = (1 << (MAX_BIT_TABLE[res as usize] - 1)) as f32;
-                            
+
                             if quantized <= max_quant {
                                 let error = (quantized.round() * gain - max_val).abs();
                                 if error < best_error {
@@ -547,7 +521,7 @@ impl HcaEncoder {
         // Check if all scale factors are the same or zero
         let first = scale_factors[0];
         let all_same = scale_factors[..coded_count].iter().all(|&sf| sf == first);
-        
+
         if all_same && first == 0 {
             writer.write(0, 3); // delta_bits = 0 (all zero)
             return;
@@ -555,8 +529,8 @@ impl HcaEncoder {
 
         // Use fixed 6-bit encoding for simplicity
         writer.write(6, 3); // delta_bits = 6 means direct encoding
-        for i in 0..coded_count {
-            writer.write(scale_factors[i] as u32, 6);
+        for scale_factor in scale_factors.iter().take(coded_count) {
+            writer.write(*scale_factor as u32, 6);
         }
     }
 
@@ -686,15 +660,12 @@ pub fn encode_wav_to_hca<W: Write + Seek>(
                 ]) >> 8;
                 raw as f32 / 8388608.0
             }
-            32 => {
-                let raw = f32::from_le_bytes([
-                    wav_data[offset],
-                    wav_data[offset + 1],
-                    wav_data[offset + 2],
-                    wav_data[offset + 3],
-                ]);
-                raw
-            }
+            32 => f32::from_le_bytes([
+                wav_data[offset],
+                wav_data[offset + 1],
+                wav_data[offset + 2],
+                wav_data[offset + 3],
+            ]),
             _ => 0.0,
         };
         samples.push(sample);

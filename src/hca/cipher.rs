@@ -119,8 +119,8 @@ mod tests {
     fn test_cipher_init_0() {
         let mut table = [0u8; 256];
         cipher_init_0(&mut table);
-        for i in 0..256 {
-            assert_eq!(table[i], i as u8);
+        for (i, value) in table.iter().enumerate() {
+            assert_eq!(*value, i as u8);
         }
     }
 
