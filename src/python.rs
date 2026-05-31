@@ -112,6 +112,7 @@ fn build_acb_bytes(tracks: Vec<(String, u32, Vec<u8>)>) -> PyResult<Vec<u8>> {
 /// Returns:
 ///     ACB file data as bytes
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
 fn build_music_acb_bytes(
     name: String,
     hca_data: Vec<u8>,

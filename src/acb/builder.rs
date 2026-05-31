@@ -722,6 +722,7 @@ impl AcbBuilder {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn music_acb(
         mut self,
         cue_id: u32,
