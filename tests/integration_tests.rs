@@ -470,6 +470,22 @@ fn test_hca_encoder_roundtrip() {
         expected_min,
         expected_max
     );
+
+    let rms =
+        (decoded.iter().map(|sample| sample * sample).sum::<f32>() / decoded.len() as f32).sqrt();
+    let (min_sample, max_sample) = decoded
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), sample| {
+            (min.min(*sample), max.max(*sample))
+        });
+    assert!(
+        rms > 0.01,
+        "Decoded signal RMS should be non-trivial: {rms}"
+    );
+    assert!(
+        max_sample - min_sample > 0.05,
+        "Decoded signal should not be silent or DC-only: min={min_sample}, max={max_sample}"
+    );
 }
 
 /// Test ACB builder creates valid container
@@ -640,7 +656,10 @@ fn test_afs_archive_builder() {
     assert_eq!(&data[0..4], b"AFS2", "Should have AFS2 magic");
 }
 
-/// Test USM builder creates valid container
+/// Test USM builder writes the expected minimal container structure.
+///
+/// `UsmBuilder` is not a full muxer yet, so this intentionally does not assert
+/// round-trip extraction through `extract_usm`.
 #[test]
 fn test_usm_builder_structure() {
     use cridecoder::UsmBuilder;
@@ -663,8 +682,19 @@ fn test_usm_builder_structure() {
     );
 
     let data = output.into_inner();
-    // Verify CRID magic
     assert_eq!(&data[0..4], b"CRID", "Should have CRID magic");
+    assert!(
+        data.windows(4).any(|window| window == b"@SFV"),
+        "Should include a video stream format chunk"
+    );
+    assert!(
+        data.windows(4).any(|window| window == b"@SBV"),
+        "Should include a video stream data chunk"
+    );
+    assert!(
+        data.windows(4).any(|window| window == b"@END"),
+        "Should include the current generic end marker"
+    );
 }
 
 /// Helper to create a minimal HCA header for testing

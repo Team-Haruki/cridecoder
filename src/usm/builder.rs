@@ -27,6 +27,10 @@ pub enum StreamType {
 }
 
 /// Builder for USM containers
+///
+/// This builder currently writes a minimal structural USM-like container for
+/// packaging experiments. It is not yet a full CRI Sofdec muxer and does not
+/// guarantee round-tripping through `extract_usm`.
 pub struct UsmBuilder {
     filename: String,
     video_stream: Option<Vec<u8>>,
@@ -367,9 +371,9 @@ impl UsmBuilder {
         }
 
         // Write end markers
-        self.write_end_marker(writer, b"@SFV")?;
+        self.write_end_marker(writer)?;
         for _ in 0..self.audio_streams.len() {
-            self.write_end_marker(writer, b"@SFA")?;
+            self.write_end_marker(writer)?;
         }
 
         Ok(())
@@ -438,11 +442,7 @@ impl UsmBuilder {
         Ok(())
     }
 
-    fn write_end_marker<W: Write>(
-        &self,
-        writer: &mut W,
-        _sig: &[u8],
-    ) -> Result<(), UsmBuilderError> {
+    fn write_end_marker<W: Write>(&self, writer: &mut W) -> Result<(), UsmBuilderError> {
         writer.write_all(b"@END")?;
         write_u32_be(writer, 0x18)?;
         write_u16_be(writer, 0x0001)?;

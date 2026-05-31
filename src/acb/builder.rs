@@ -61,7 +61,7 @@ impl TrackInput {
         }
         match &data[0..4] {
             [0x80, 0x00, ..] | [0x00, 0x00, 0x00, 0x80] => WAVEFORM_ENCODE_TYPE_ADX,
-            b"HCA\x00" | [0xc8, 0xc3, 0xc1, 0x00] => WAVEFORM_ENCODE_TYPE_HCA, // HCA or masked HCA
+            b"HCA\x00" | [0xc8, 0xc3, 0xc1, 0x80] => WAVEFORM_ENCODE_TYPE_HCA, // HCA or masked HCA
             _ if data.len() > 6 && data[0] == 0xC8 => WAVEFORM_ENCODE_TYPE_HCA, // masked HCA header
             _ => WAVEFORM_ENCODE_TYPE_HCA,
         }
