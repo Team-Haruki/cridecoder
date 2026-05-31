@@ -24,7 +24,7 @@ fn test_acb_extraction() {
 
     let tracks = result.expect("ACB extraction should not error");
     let tracks = tracks.expect("Should find tracks in ACB");
-    assert!(tracks.len() > 0, "Should extract at least one track");
+    assert!(!tracks.is_empty(), "Should extract at least one track");
 
     // Verify extracted files exist and are HCA
     for track_path in &tracks {
@@ -258,7 +258,7 @@ fn test_usm_extraction() {
     let result = cridecoder::extract_usm_file(usm_path, dir.path(), None, false);
 
     let files = result.expect("USM extraction should not error");
-    assert!(files.len() > 0, "Should extract at least one file");
+    assert!(!files.is_empty(), "Should extract at least one file");
 
     // Verify extracted video file
     for file_path in &files {
@@ -401,5 +401,336 @@ fn test_usm_from_memory() {
     let result =
         cridecoder::usm::extract_usm(Cursor::new(data), dir.path(), b"0703.usm", None, false);
     let files = result.expect("Should extract from in-memory USM data");
-    assert!(files.len() > 0, "Should extract at least one file");
+    assert!(!files.is_empty(), "Should extract at least one file");
+}
+
+// =============================================================================
+// Encoder Tests
+// =============================================================================
+
+/// Test HCA encoder with synthetic sine wave
+#[test]
+fn test_hca_encoder_roundtrip() {
+    use cridecoder::{HcaDecoder, HcaEncoder, HcaEncoderConfig};
+
+    // Generate a 1-second stereo sine wave at 44.1kHz
+    let sample_rate = 44100;
+    let channels = 2u32;
+    let duration_secs = 1.0;
+    let sample_count = (sample_rate as f32 * duration_secs) as usize;
+    let freq = 440.0; // A4 note
+
+    let mut samples = Vec::with_capacity(sample_count * channels as usize);
+    for i in 0..sample_count {
+        let t = i as f32 / sample_rate as f32;
+        let sample = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.5;
+        for _ in 0..channels {
+            samples.push(sample);
+        }
+    }
+
+    // Create encoder config
+    let config = HcaEncoderConfig {
+        channels,
+        sample_rate,
+        bitrate: 256_000,
+        ..Default::default()
+    };
+
+    // Encode to HCA
+    let mut encoder = HcaEncoder::new(config).expect("Should create encoder");
+    let mut hca_data = Vec::new();
+    encoder
+        .encode(&samples, &mut Cursor::new(&mut hca_data))
+        .expect("Should encode samples");
+
+    // Verify HCA magic
+    assert_eq!(&hca_data[0..4], b"HCA\x00", "Should have HCA magic");
+
+    // Decode back
+    let mut decoder = HcaDecoder::from_reader(Cursor::new(&hca_data))
+        .expect("Should create decoder from encoded HCA");
+
+    let info = decoder.info();
+    assert_eq!(info.sampling_rate, sample_rate, "Sample rate should match");
+    assert_eq!(info.channel_count, channels, "Channel count should match");
+
+    let decoded = decoder.decode_all().expect("Should decode encoded HCA");
+    assert!(!decoded.is_empty(), "Should decode some samples");
+
+    // The decoded length won't exactly match due to HCA frame boundaries and encoder delay
+    // but it should be reasonably close
+    let expected_min = sample_count * channels as usize - 2048 * channels as usize;
+    let expected_max = sample_count * channels as usize + 4096 * channels as usize;
+    assert!(
+        decoded.len() >= expected_min && decoded.len() <= expected_max,
+        "Decoded sample count {} should be close to original {} (range {}-{})",
+        decoded.len(),
+        sample_count * channels as usize,
+        expected_min,
+        expected_max
+    );
+
+    let rms =
+        (decoded.iter().map(|sample| sample * sample).sum::<f32>() / decoded.len() as f32).sqrt();
+    let (min_sample, max_sample) = decoded
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), sample| {
+            (min.min(*sample), max.max(*sample))
+        });
+    assert!(
+        rms > 0.01,
+        "Decoded signal RMS should be non-trivial: {rms}"
+    );
+    assert!(
+        max_sample - min_sample > 0.05,
+        "Decoded signal should not be silent or DC-only: min={min_sample}, max={max_sample}"
+    );
+}
+
+/// Test ACB builder creates valid container
+#[test]
+fn test_acb_builder_basic() {
+    use cridecoder::{AcbBuilder, TrackInput};
+
+    // Create a minimal HCA file (just header for testing structure)
+    let dummy_hca = create_minimal_hca_header();
+
+    let input = TrackInput::new("test_track", 0, dummy_hca);
+
+    let mut builder = AcbBuilder::new();
+    builder.add_track(input);
+
+    let mut output = Vec::new();
+    let result = builder.build(&mut Cursor::new(&mut output), None);
+    assert!(
+        result.is_ok(),
+        "ACB build should succeed: {:?}",
+        result.err()
+    );
+    assert!(output.len() > 64, "ACB should have content");
+
+    // Verify UTF magic
+    assert_eq!(&output[0..4], b"@UTF", "Should have UTF magic");
+
+    let dir = tempfile::tempdir().unwrap();
+    let extracted = cridecoder::extract_acb(Cursor::new(output), dir.path(), None)
+        .expect("Built ACB should be extractable");
+    assert_eq!(extracted.len(), 1, "Should extract one built track");
+
+    let extracted_data = std::fs::read(&extracted[0]).expect("Should read extracted track");
+    assert_eq!(&extracted_data[0..4], b"HCA\x00");
+}
+
+/// Test ACB builder keeps Waveform AWB ids aligned with non-zero cue ids
+#[test]
+fn test_acb_builder_nonzero_cue_id() {
+    use cridecoder::{AcbBuilder, TrackInput};
+
+    let dummy_hca = create_minimal_hca_header();
+    let input = TrackInput::new("test_track_42", 42, dummy_hca);
+
+    let mut builder = AcbBuilder::new();
+    builder.add_track(input);
+
+    let mut output = Vec::new();
+    builder
+        .build(&mut Cursor::new(&mut output), None)
+        .expect("ACB build should succeed");
+
+    let dir = tempfile::tempdir().unwrap();
+    let extracted = cridecoder::extract_acb(Cursor::new(output), dir.path(), None)
+        .expect("Built ACB with non-zero cue id should be extractable");
+    assert_eq!(extracted.len(), 1, "Should extract one built track");
+
+    let extracted_data = std::fs::read(&extracted[0]).expect("Should read extracted track");
+    assert_eq!(&extracted_data[0..4], b"HCA\x00");
+}
+
+/// Test ACB builder rejects cue IDs that would make invalid Waveform AWB ids
+#[test]
+fn test_acb_builder_rejects_invalid_cue_ids() {
+    use cridecoder::{AcbBuilder, BuilderError, TrackInput};
+
+    let dummy_hca = create_minimal_hca_header();
+
+    let mut too_large = AcbBuilder::new();
+    too_large.add_track(TrackInput::new("too_large", 0x1_0000, dummy_hca.clone()));
+    let err = too_large
+        .build(&mut Cursor::new(Vec::new()), None)
+        .expect_err("ACB build should reject cue ids above WaveformTable limits");
+    assert!(matches!(err, BuilderError::CueIdTooLarge(0x1_0000)));
+
+    let mut duplicate = AcbBuilder::new();
+    duplicate.add_track(TrackInput::new("first", 7, dummy_hca.clone()));
+    duplicate.add_track(TrackInput::new("second", 7, dummy_hca));
+    let err = duplicate
+        .build(&mut Cursor::new(Vec::new()), None)
+        .expect_err("ACB build should reject duplicate cue ids");
+    assert!(matches!(err, BuilderError::DuplicateCueId(7)));
+}
+
+/// Test music ACB builder emits sample-like tables
+#[test]
+fn test_music_acb_builder_structure() {
+    use cridecoder::acb::UtfTable;
+    use cridecoder::{AcbBuilder, TrackInput};
+
+    let dummy_hca = create_minimal_hca_header();
+    let input = TrackInput::new("3001_01", 0, dummy_hca);
+
+    let mut builder = AcbBuilder::new().music_acb(
+        0,
+        Some("_alt".to_string()),
+        0,
+        1_024,
+        1,
+        1,
+        vec![0; 16],
+        vec![1; 16],
+        "dummy".to_string(),
+        1.0,
+        0,
+        0,
+        "category".to_string(),
+        0,
+        vec!["bus".to_string()],
+    );
+    builder.add_track(input);
+
+    let mut output = Vec::new();
+    builder
+        .build(&mut Cursor::new(&mut output), None)
+        .expect("Music ACB build should succeed");
+
+    let header = UtfTable::new(Cursor::new(&output)).expect("Header should parse");
+    let row = &header.rows[0];
+    assert_eq!(row["Name"].as_string(), Some("3001_01"));
+
+    let cue_names = UtfTable::new(Cursor::new(row["CueNameTable"].as_bytes().unwrap()))
+        .expect("CueNameTable should parse");
+    let names: Vec<_> = cue_names
+        .rows
+        .iter()
+        .map(|row| row["CueName"].as_string().unwrap())
+        .collect();
+    assert_eq!(names, vec!["3001_01", "3001_01_alt"]);
+
+    let waveform = UtfTable::new(Cursor::new(row["WaveformTable"].as_bytes().unwrap()))
+        .expect("WaveformTable should parse");
+    assert_eq!(waveform.rows.len(), 1);
+    assert_eq!(waveform.rows[0]["MemoryAwbId"].as_int(), Some(0));
+    assert_eq!(waveform.rows[0]["EncodeType"].as_int(), Some(2));
+    assert_eq!(waveform.rows[0]["NumChannels"].as_int(), Some(2));
+    assert_eq!(waveform.rows[0]["SamplingRate"].as_int(), Some(44_100));
+
+    let dir = tempfile::tempdir().unwrap();
+    let extracted = cridecoder::extract_acb(Cursor::new(output), dir.path(), None)
+        .expect("Music ACB should be extractable");
+    assert_eq!(
+        extracted.len(),
+        2,
+        "Music ACB should expose base and virtual cues"
+    );
+}
+
+/// Test AFS2 archive builder
+#[test]
+fn test_afs_archive_builder() {
+    use cridecoder::AfsArchiveBuilder;
+
+    let file1 = vec![0x48, 0x43, 0x41, 0x00]; // HCA magic
+    let file2 = vec![0x48, 0x43, 0x41, 0x00, 0x01, 0x02];
+
+    let mut builder = AfsArchiveBuilder::new();
+    builder.add_file(0, file1);
+    builder.add_file(1, file2);
+
+    let mut output = Cursor::new(Vec::new());
+    builder
+        .build(&mut output)
+        .expect("AFS build should succeed");
+
+    let data = output.into_inner();
+    // Verify AFS2 magic
+    assert_eq!(&data[0..4], b"AFS2", "Should have AFS2 magic");
+}
+
+/// Test USM builder writes the expected minimal container structure.
+///
+/// `UsmBuilder` is not a full muxer yet, so this intentionally does not assert
+/// round-trip extraction through `extract_usm`.
+#[test]
+fn test_usm_builder_structure() {
+    use cridecoder::UsmBuilder;
+
+    // Create minimal M2V header (MPEG-2 sequence header)
+    let video_data = vec![
+        0x00, 0x00, 0x01, 0xB3, // sequence_header_code
+        0x14, 0x00, 0xF0, 0x24, // picture size, aspect, frame rate
+        0xFF, 0xFF, 0xE0, 0x00, // bit rate, vbv buffer
+    ];
+
+    let builder = UsmBuilder::new("test".to_string()).video(video_data);
+
+    let mut output = Cursor::new(Vec::new());
+    let result = builder.build(&mut output);
+    assert!(
+        result.is_ok(),
+        "USM build should succeed: {:?}",
+        result.err()
+    );
+
+    let data = output.into_inner();
+    assert_eq!(&data[0..4], b"CRID", "Should have CRID magic");
+    assert!(
+        data.windows(4).any(|window| window == b"@SFV"),
+        "Should include a video stream format chunk"
+    );
+    assert!(
+        data.windows(4).any(|window| window == b"@SBV"),
+        "Should include a video stream data chunk"
+    );
+    assert!(
+        data.windows(4).any(|window| window == b"@END"),
+        "Should include the current generic end marker"
+    );
+}
+
+/// Helper to create a minimal HCA header for testing
+fn create_minimal_hca_header() -> Vec<u8> {
+    let mut data = Vec::new();
+
+    // HCA signature
+    data.extend_from_slice(b"HCA\x00");
+    data.extend_from_slice(&[0x02, 0x00]); // version 2.0
+    data.extend_from_slice(&[0x00, 0x60]); // header size 96
+
+    // fmt chunk
+    data.extend_from_slice(b"fmt\x00");
+    data.extend_from_slice(&[2]); // 2 channels
+    data.extend_from_slice(&[0x00, 0xAC, 0x44]); // 44100 Hz (BE)
+    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]); // 16 blocks
+    data.extend_from_slice(&[0x00, 0x00]); // encoder delay
+    data.extend_from_slice(&[0x00, 0x00]); // insert samples
+
+    // comp chunk
+    data.extend_from_slice(b"comp");
+    data.extend_from_slice(&[0x01, 0x55]); // frame size 341
+    data.extend_from_slice(&[0x00]); // min resolution
+    data.extend_from_slice(&[0x0F]); // max resolution
+    data.extend_from_slice(&[0x01]); // track count
+    data.extend_from_slice(&[0x01]); // channel config
+    data.extend_from_slice(&[0x80]); // total band count
+    data.extend_from_slice(&[0x60]); // base band count
+    data.extend_from_slice(&[0x00]); // stereo band count
+    data.extend_from_slice(&[0x00]); // bands per hfr group
+    data.extend_from_slice(&[0x00, 0x00]); // reserved
+
+    // Pad to header size
+    while data.len() < 96 {
+        data.push(0);
+    }
+
+    data
 }

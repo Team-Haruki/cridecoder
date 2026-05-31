@@ -27,21 +27,40 @@ pub const COLUMN_TYPE_DATA: u8 = 0x0B; // variable-length data (offset+size)
 
 // Waveform encoding types
 pub const WAVEFORM_ENCODE_TYPE_ADX: i32 = 0;
+pub const WAVEFORM_ENCODE_TYPE_AHX: i32 = 1;
 pub const WAVEFORM_ENCODE_TYPE_HCA: i32 = 2;
+pub const WAVEFORM_ENCODE_TYPE_ADX_ALT: i32 = 3;
+pub const WAVEFORM_ENCODE_TYPE_WII_ADPCM: i32 = 4;
+pub const WAVEFORM_ENCODE_TYPE_DS_ADPCM: i32 = 5;
+pub const WAVEFORM_ENCODE_TYPE_HCA_MX: i32 = 6;
 pub const WAVEFORM_ENCODE_TYPE_VAG: i32 = 7;
 pub const WAVEFORM_ENCODE_TYPE_ATRAC3: i32 = 8;
 pub const WAVEFORM_ENCODE_TYPE_BCWAV: i32 = 9;
+pub const WAVEFORM_ENCODE_TYPE_HEVAG: i32 = 10;
+pub const WAVEFORM_ENCODE_TYPE_ATRAC9: i32 = 11;
+pub const WAVEFORM_ENCODE_TYPE_XMA: i32 = 12;
 pub const WAVEFORM_ENCODE_TYPE_NINTENDO_DSP: i32 = 13;
+pub const WAVEFORM_ENCODE_TYPE_PS4_ATRAC9: i32 = 18;
+pub const WAVEFORM_ENCODE_TYPE_M4A: i32 = 19;
+pub const WAVEFORM_ENCODE_TYPE_SWITCH_OPUS: i32 = 24;
 
 /// Get file extension for a waveform encode type
 pub fn wave_type_extension(enc_type: i32) -> &'static str {
     match enc_type {
-        WAVEFORM_ENCODE_TYPE_ADX => ".adx",
+        WAVEFORM_ENCODE_TYPE_ADX | WAVEFORM_ENCODE_TYPE_ADX_ALT => ".adx",
+        WAVEFORM_ENCODE_TYPE_AHX => ".ahx",
         WAVEFORM_ENCODE_TYPE_HCA => ".hca",
-        WAVEFORM_ENCODE_TYPE_VAG => ".at3",
-        WAVEFORM_ENCODE_TYPE_ATRAC3 => ".vag",
+        WAVEFORM_ENCODE_TYPE_WII_ADPCM => ".wiiadpcm",
+        WAVEFORM_ENCODE_TYPE_DS_ADPCM => ".dsadpcm",
+        WAVEFORM_ENCODE_TYPE_HCA_MX => ".hcamx",
+        WAVEFORM_ENCODE_TYPE_VAG | WAVEFORM_ENCODE_TYPE_HEVAG => ".vag",
+        WAVEFORM_ENCODE_TYPE_ATRAC3 => ".at3",
         WAVEFORM_ENCODE_TYPE_BCWAV => ".bcwav",
+        WAVEFORM_ENCODE_TYPE_ATRAC9 | WAVEFORM_ENCODE_TYPE_PS4_ATRAC9 => ".at9",
+        WAVEFORM_ENCODE_TYPE_XMA => ".xma",
         WAVEFORM_ENCODE_TYPE_NINTENDO_DSP => ".dsp",
+        WAVEFORM_ENCODE_TYPE_M4A => ".m4a",
+        WAVEFORM_ENCODE_TYPE_SWITCH_OPUS => ".lopus",
         _ => "",
     }
 }
@@ -53,13 +72,33 @@ mod tests {
     #[test]
     fn test_wave_type_extension_known() {
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_ADX), ".adx");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_AHX), ".ahx");
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_HCA), ".hca");
-        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_VAG), ".at3");
-        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_ATRAC3), ".vag");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_ADX_ALT), ".adx");
+        assert_eq!(
+            wave_type_extension(WAVEFORM_ENCODE_TYPE_WII_ADPCM),
+            ".wiiadpcm"
+        );
+        assert_eq!(
+            wave_type_extension(WAVEFORM_ENCODE_TYPE_DS_ADPCM),
+            ".dsadpcm"
+        );
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_HCA_MX), ".hcamx");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_VAG), ".vag");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_ATRAC3), ".at3");
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_BCWAV), ".bcwav");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_HEVAG), ".vag");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_ATRAC9), ".at9");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_XMA), ".xma");
         assert_eq!(
             wave_type_extension(WAVEFORM_ENCODE_TYPE_NINTENDO_DSP),
             ".dsp"
+        );
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_PS4_ATRAC9), ".at9");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_M4A), ".m4a");
+        assert_eq!(
+            wave_type_extension(WAVEFORM_ENCODE_TYPE_SWITCH_OPUS),
+            ".lopus"
         );
     }
 
@@ -67,7 +106,7 @@ mod tests {
     fn test_wave_type_extension_unknown() {
         assert_eq!(wave_type_extension(-1), "");
         assert_eq!(wave_type_extension(99), "");
-        assert_eq!(wave_type_extension(1), "");
+        assert_eq!(wave_type_extension(14), "");
     }
 
     #[test]

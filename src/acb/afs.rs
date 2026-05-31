@@ -25,6 +25,7 @@ pub struct AfsFileEntry {
 /// AFS2 archive
 pub struct AfsArchive<R: Read + Seek> {
     pub alignment: u32,
+    pub subkey: u16,
     pub files: Vec<AfsFileEntry>,
     reader: Reader<R>,
 }
@@ -42,7 +43,8 @@ impl<R: Read + Seek> AfsArchive<R> {
 
         let version = buf.read_bytes(4)?;
         let file_count = buf.read_u32_le()?;
-        let alignment = buf.read_u32_le()?;
+        let alignment = buf.read_u16_le()? as u32;
+        let subkey = buf.read_u16_le()?;
 
         let cue_id_size = version[2] as usize;
         let offset_size = version[1] as usize;
@@ -94,6 +96,7 @@ impl<R: Read + Seek> AfsArchive<R> {
 
         Ok(Self {
             alignment,
+            subkey,
             files,
             reader: buf,
         })

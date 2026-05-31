@@ -167,6 +167,10 @@ impl BitWriter {
         &self.data
     }
 
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
     pub fn into_vec(self) -> Vec<u8> {
         self.data
     }

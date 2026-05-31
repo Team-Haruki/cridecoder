@@ -1,77 +1,54 @@
-# AGENTS.md
+# Copilot Instructions for cridecoder
 
-## Project Overview
+## Project Context
 
-**cridecoder** is a pure Rust library for decoding CRI Middleware formats, with optional Python bindings via pyo3/maturin.
+This is a pure Rust library (`cridecoder`) for decoding CRI Middleware audio/video formats (ACB, HCA, USM). The CRI format implementation is based on [vgmstream](https://github.com/vgmstream/vgmstream). It also provides optional Python bindings via pyo3/maturin.
 
-### Credits
+## Code Style
 
-CRI format implementation is based on [vgmstream](https://github.com/vgmstream/vgmstream).
+- **Rust edition**: 2021
+- **Error handling**: Use `thiserror` derive macros for error enums
+- **Binary I/O**: Use the `reader.rs` wrapper around `byteorder` for all binary reading
+- **Text encoding**: CRI formats use Shift-JIS; use `encoding_rs::SHIFT_JIS` for decoding
+- **Module structure**: Use Rust 2018+ flat module style (`src/acb.rs` + `src/acb/` directory), not `mod.rs`
+- **Feature gates**: Python bindings use `#[cfg(feature = "python")]` — pure Rust builds should not depend on pyo3
+- **Tests**: Unit tests are inline `#[cfg(test)] mod tests`, integration tests are in `tests/`
 
-## Architecture
+## Important Notes
 
-```
-src/
-├── lib.rs          # Crate root, re-exports public API, #[pymodule] (behind "python" feature)
-├── reader.rs       # Binary reader utilities (endianness, primitive types, alignment)
-├── acb.rs          # ACB module root (re-exports submodules)
-├── acb/
-│   ├── consts.rs   # ACB/UTF constants and helpers
-│   ├── utf.rs      # CRI UTF table parser
-│   ├── afs.rs      # AFS2 archive parser
-│   ├── track.rs    # Track list extraction from ACB
-│   └── extractor.rs # ACB extraction logic
-├── hca.rs          # HCA module root (re-exports submodules)
-├── hca/
-│   ├── decoder.rs  # Core HCA decoder (ClHca, header parsing, block decoding)
-│   ├── hca_file.rs # High-level HcaDecoder with streaming, WAV output, key testing
-│   ├── tables.rs   # Lookup tables for HCA decoding
-│   ├── cipher.rs   # HCA encryption/decryption cipher
-│   ├── ath.rs      # ATH (Absolute Threshold of Hearing) tables
-│   ├── bitreader.rs # Bit-level reader/writer
-│   └── imdct.rs    # Inverse MDCT transform
-├── usm.rs          # USM module root (re-exports submodules)
-├── usm/
-│   ├── extractor.rs # USM extraction (video/audio stream demuxing)
-│   └── metadata.rs  # USM metadata reading and JSON export
-└── python.rs       # Python bindings (behind "python" feature)
-```
+- The `ClHca` struct (HCA decoder state) is very large (~200KB on stack). Use `RUST_MIN_STACK=16777216` when running integration tests
+- ACB files may contain embedded AWB data or reference external `.awb` files
+- HCA files support encryption — use `HcaDecoder::set_key()` or `KeyTest` for key testing
+- USM files contain interleaved video (M2V) and audio (ADX) chunks with XOR masking
 
-## Key Types
+## Public API
 
-- `extract_acb_from_file()` / `extract_acb()` — ACB extraction entry points
-- `HcaDecoder` — High-level HCA to WAV/PCM decoder
-- `extract_usm_file()` / `extract_usm()` — USM extraction entry points
-- `ClHca` — Low-level HCA decoder state machine
+```rust
+// ACB
+pub fn extract_acb_from_file(path, output_dir) -> Result<Option<Vec<String>>>
+pub fn extract_acb(reader, output_dir, awb_reader) -> Result<Vec<String>>
 
-## Building
+// HCA
+pub struct HcaDecoder { ... }
+impl HcaDecoder {
+    pub fn from_file(path) -> Result<Self>
+    pub fn from_reader(reader) -> Result<Self>
+    pub fn info(&self) -> &HcaInfo
+    pub fn decode_to_wav(&mut self, writer) -> Result<()>
+    pub fn decode_all(&mut self) -> Result<Vec<f32>>
+}
 
-```bash
-# Pure Rust
-cargo build
-cargo test                              # Unit tests only
-RUST_MIN_STACK=16777216 cargo test       # Unit + integration tests (HCA needs larger stack)
-
-# Python extension
-python3 -m maturin build --release
-
-# crates.io dry run
-cargo publish --dry-run --allow-dirty
+// USM
+pub fn extract_usm_file(path, output_dir, key, export_audio) -> Result<Vec<PathBuf>>
+pub fn extract_usm(reader, output_dir, name, key, export_audio) -> Result<Vec<PathBuf>>
 ```
 
 ## Testing
 
-- **Unit tests**: Inline `#[cfg(test)] mod tests` in most modules
-- **Integration tests**: `tests/integration_tests.rs` — requires `se_0126_01.acb` and `0703.usm` test fixtures in project root
-- Integration tests need `RUST_MIN_STACK=16777216` due to large `ClHca` struct
-
-## Conventions
-
-- Use `thiserror` for error types
-- Use `byteorder` for binary reading via the `reader.rs` wrapper
-- Use `encoding_rs` for Shift-JIS text decoding (CRI uses Shift-JIS strings)
-- Public API lives in module root files (`acb.rs`, `hca.rs`, `usm.rs`); internals are `mod` (private)
-- Python bindings are behind `#[cfg(feature = "python")]` so they're opt-in
+```bash
+cargo test                              # Unit tests only
+RUST_MIN_STACK=16777216 cargo test       # Full test suite (needs test fixture files)
+```
 
 ## Git commits
 

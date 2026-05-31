@@ -125,7 +125,7 @@ pub struct HcaInfo {
 }
 
 /// CRC16 table for HCA
-const CRC16_TABLE: [u16; 256] = [
+pub const CRC16_TABLE: [u16; 256] = [
     0x0000, 0x8005, 0x800F, 0x000A, 0x801B, 0x001E, 0x0014, 0x8011, 0x8033, 0x0036, 0x003C, 0x8039,
     0x0028, 0x802D, 0x8027, 0x0022, 0x8063, 0x0066, 0x006C, 0x8069, 0x0078, 0x807D, 0x8077, 0x0072,
     0x0050, 0x8055, 0x805F, 0x005A, 0x804B, 0x004E, 0x0044, 0x8041, 0x80C3, 0x00C6, 0x00CC, 0x80C9,
@@ -150,7 +150,8 @@ const CRC16_TABLE: [u16; 256] = [
     0x0208, 0x820D, 0x8207, 0x0202,
 ];
 
-fn crc16_checksum(data: &[u8]) -> u16 {
+/// Calculate CRC16 checksum for HCA data
+pub fn crc16_checksum(data: &[u8]) -> u16 {
     let mut sum: u16 = 0;
     for &byte in data {
         sum = (sum << 8) ^ CRC16_TABLE[((sum >> 8) ^ byte as u16) as usize];

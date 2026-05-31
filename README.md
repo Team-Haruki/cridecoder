@@ -1,6 +1,6 @@
 # cridecoder
 
-A pure Rust library for CRI Middleware codec decoding. Supports ACB/AWB audio containers, HCA (High Compression Audio) decoding, and USM video container extraction.
+A pure Rust library for CRI Middleware codec encoding and decoding. Supports ACB/AWB audio containers, HCA (High Compression Audio) encoding/decoding, and USM video container extraction/building.
 
 ## Credits
 
@@ -8,11 +8,12 @@ This project's CRI format implementation is based on and inspired by [vgmstream]
 
 ## Features
 
-- **ACB/AWB Extraction** — Parse CRI ACB audio containers and extract embedded/external audio tracks
-- **HCA Decoding** — Decode HCA audio to PCM samples (f32 or i16) or WAV files
-- **USM Extraction** — Extract MPEG2 video and ADX audio streams from USM video containers
+- **ACB/AWB Extraction & Building** — Parse and create CRI ACB audio containers
+- **HCA Encoding & Decoding** — Encode PCM to HCA, decode HCA to PCM/WAV
+- **USM Extraction & Building** — Extract or create USM video containers
 - **USM Metadata** — Read and export USM metadata as structured JSON
 - **Key Testing** — Test decryption keys for encrypted HCA files
+- **Encryption Support** — Encode HCA with encryption keys
 - **Pure Rust** — No C dependencies, works on any platform Rust supports
 
 ## Usage
@@ -42,6 +43,22 @@ if let Some(tracks) = tracks {
 }
 ```
 
+### ACB Building
+
+```rust
+use std::io::Cursor;
+use cridecoder::{AcbBuilder, TrackInput};
+
+let hca_data = std::fs::read("track.hca").unwrap();
+let track = TrackInput::new("my_track", 0, hca_data);
+
+let mut builder = AcbBuilder::new();
+builder.add_track(track);
+
+let mut output = Cursor::new(Vec::new());
+builder.build(&mut output, None).unwrap();
+```
+
 ### HCA to WAV
 
 ```rust
@@ -54,6 +71,23 @@ println!("Sample rate: {}, Channels: {}", info.sampling_rate, info.channel_count
 
 let mut output = File::create("output.wav").unwrap();
 decoder.decode_to_wav(&mut output).unwrap();
+```
+
+### PCM to HCA
+
+```rust
+use std::io::Cursor;
+use cridecoder::{HcaEncoder, HcaEncoderConfig};
+
+// Generate or load PCM samples (interleaved stereo f32)
+let samples: Vec<f32> = vec![0.0; 44100 * 2]; // 1 second of silence
+
+let config = HcaEncoderConfig::new(44100, 2)  // 44.1kHz stereo
+    .with_bitrate(256_000);  // 256 kbps
+
+let mut encoder = HcaEncoder::new(config).unwrap();
+let mut output = Cursor::new(Vec::new());
+encoder.encode(&samples, &mut output).unwrap();
 ```
 
 ### USM Extraction
@@ -74,14 +108,29 @@ for file in &files {
 }
 ```
 
+### USM Building
+
+```rust
+use std::io::Cursor;
+use cridecoder::UsmBuilder;
+
+let video_data = std::fs::read("video.m2v").unwrap();
+
+let builder = UsmBuilder::new("my_video".to_string())
+    .video(video_data);
+
+let mut output = Cursor::new(Vec::new());
+builder.build(&mut output).unwrap();
+```
+
 ## Supported Formats
 
-| Format | Description | Operation |
-|--------|-------------|-----------|
-| ACB | CRI Audio Container | Extract embedded HCA/ADX tracks |
-| AWB | CRI Audio Waveform Bank | External track storage for ACB |
-| HCA | High Compression Audio | Decode to WAV/PCM |
-| USM | CRI Video Container | Extract M2V video + ADX audio |
+| Format | Description | Operations |
+|--------|-------------|------------|
+| ACB | CRI Audio Container | Extract / Build |
+| AWB | CRI Audio Waveform Bank | Extract / Build |
+| HCA | High Compression Audio | Encode / Decode |
+| USM | CRI Video Container | Extract / Build |
 
 ## License
 

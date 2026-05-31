@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(scale_frame_score(1), 1);
         assert_eq!(scale_frame_score(0), 3 * HCA_KEY_SCORE_SCALE); // 30
         assert_eq!(scale_frame_score(5), 5 * HCA_KEY_SCORE_SCALE); // 50
-        assert_eq!(scale_frame_score(-1), -1 * HCA_KEY_SCORE_SCALE); // -10
+        assert_eq!(scale_frame_score(-1), -HCA_KEY_SCORE_SCALE); // -10
     }
 
     #[test]
