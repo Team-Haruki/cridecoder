@@ -88,6 +88,76 @@ fn build_acb_bytes(tracks: Vec<(String, u32, Vec<u8>)>) -> PyResult<Vec<u8>> {
     Ok(output.into_inner())
 }
 
+/// Build a single-track music ACB from one HCA track (returns bytes).
+///
+/// Args:
+///     name: Cue sheet/base cue name
+///     hca_data: Raw HCA file data
+///     cue_id: Base cue ID
+///     virtual_cue_suffix: Optional suffix for the paired virtual cue
+///     memory_awb_id: Embedded AWB file ID
+///     reference_num_samples: Fallback/reference sample count
+///     reference_length_ms: Fallback/reference cue length in milliseconds
+///     acb_version: Header version value
+///     acf_md5_hash: 16-byte ACF hash
+///     acb_guid: 16-byte ACB GUID
+///     version_string: Header version string
+///     acb_volume: Header volume value
+///     category_extension: Category extension value
+///     cue_priority_type: Cue priority type value
+///     acf_category_name: ACF category reference name
+///     acf_category_id: ACF category reference id
+///     acf_bus_names: ACF bus/output names
+///
+/// Returns:
+///     ACB file data as bytes
+#[pyfunction]
+fn build_music_acb_bytes(
+    name: String,
+    hca_data: Vec<u8>,
+    cue_id: u32,
+    virtual_cue_suffix: Option<String>,
+    memory_awb_id: u16,
+    reference_num_samples: u32,
+    reference_length_ms: u32,
+    acb_version: u32,
+    acf_md5_hash: Vec<u8>,
+    acb_guid: Vec<u8>,
+    version_string: String,
+    acb_volume: f32,
+    category_extension: u8,
+    cue_priority_type: u8,
+    acf_category_name: String,
+    acf_category_id: u32,
+    acf_bus_names: Vec<String>,
+) -> PyResult<Vec<u8>> {
+    let mut builder = AcbBuilder::new().music_acb(
+        cue_id,
+        virtual_cue_suffix,
+        memory_awb_id,
+        reference_num_samples,
+        reference_length_ms,
+        acb_version,
+        acf_md5_hash,
+        acb_guid,
+        version_string,
+        acb_volume,
+        category_extension,
+        cue_priority_type,
+        acf_category_name,
+        acf_category_id,
+        acf_bus_names,
+    );
+    builder.add_track(TrackInput::new(name, cue_id, hca_data));
+
+    let mut output = Cursor::new(Vec::new());
+    builder
+        .build(&mut output, None)
+        .map_err(|e| PyRuntimeError::new_err(format!("Music ACB build failed: {}", e)))?;
+
+    Ok(output.into_inner())
+}
+
 /// Decode an HCA file to WAV format.
 ///
 /// Args:
@@ -435,6 +505,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_acb, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(build_music_acb_bytes, m)?)?;
 
     // HCA functions
     m.add_function(wrap_pyfunction!(decode_hca, m)?)?;

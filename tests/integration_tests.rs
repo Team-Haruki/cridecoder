@@ -506,6 +506,118 @@ fn test_acb_builder_basic() {
     assert_eq!(&extracted_data[0..4], b"HCA\x00");
 }
 
+/// Test ACB builder keeps Waveform AWB ids aligned with non-zero cue ids
+#[test]
+fn test_acb_builder_nonzero_cue_id() {
+    use cridecoder::{AcbBuilder, TrackInput};
+
+    let dummy_hca = create_minimal_hca_header();
+    let input = TrackInput::new("test_track_42", 42, dummy_hca);
+
+    let mut builder = AcbBuilder::new();
+    builder.add_track(input);
+
+    let mut output = Vec::new();
+    builder
+        .build(&mut Cursor::new(&mut output), None)
+        .expect("ACB build should succeed");
+
+    let dir = tempfile::tempdir().unwrap();
+    let extracted = cridecoder::extract_acb(Cursor::new(output), dir.path(), None)
+        .expect("Built ACB with non-zero cue id should be extractable");
+    assert_eq!(extracted.len(), 1, "Should extract one built track");
+
+    let extracted_data = std::fs::read(&extracted[0]).expect("Should read extracted track");
+    assert_eq!(&extracted_data[0..4], b"HCA\x00");
+}
+
+/// Test ACB builder rejects cue IDs that would make invalid Waveform AWB ids
+#[test]
+fn test_acb_builder_rejects_invalid_cue_ids() {
+    use cridecoder::{AcbBuilder, BuilderError, TrackInput};
+
+    let dummy_hca = create_minimal_hca_header();
+
+    let mut too_large = AcbBuilder::new();
+    too_large.add_track(TrackInput::new("too_large", 0x1_0000, dummy_hca.clone()));
+    let err = too_large
+        .build(&mut Cursor::new(Vec::new()), None)
+        .expect_err("ACB build should reject cue ids above WaveformTable limits");
+    assert!(matches!(err, BuilderError::CueIdTooLarge(0x1_0000)));
+
+    let mut duplicate = AcbBuilder::new();
+    duplicate.add_track(TrackInput::new("first", 7, dummy_hca.clone()));
+    duplicate.add_track(TrackInput::new("second", 7, dummy_hca));
+    let err = duplicate
+        .build(&mut Cursor::new(Vec::new()), None)
+        .expect_err("ACB build should reject duplicate cue ids");
+    assert!(matches!(err, BuilderError::DuplicateCueId(7)));
+}
+
+/// Test music ACB builder emits sample-like tables
+#[test]
+fn test_music_acb_builder_structure() {
+    use cridecoder::acb::UtfTable;
+    use cridecoder::{AcbBuilder, TrackInput};
+
+    let dummy_hca = create_minimal_hca_header();
+    let input = TrackInput::new("3001_01", 0, dummy_hca);
+
+    let mut builder = AcbBuilder::new().music_acb(
+        0,
+        Some("_alt".to_string()),
+        0,
+        1_024,
+        1,
+        1,
+        vec![0; 16],
+        vec![1; 16],
+        "dummy".to_string(),
+        1.0,
+        0,
+        0,
+        "category".to_string(),
+        0,
+        vec!["bus".to_string()],
+    );
+    builder.add_track(input);
+
+    let mut output = Vec::new();
+    builder
+        .build(&mut Cursor::new(&mut output), None)
+        .expect("Music ACB build should succeed");
+
+    let header = UtfTable::new(Cursor::new(&output)).expect("Header should parse");
+    let row = &header.rows[0];
+    assert_eq!(row["Name"].as_string(), Some("3001_01"));
+
+    let cue_names = UtfTable::new(Cursor::new(row["CueNameTable"].as_bytes().unwrap()))
+        .expect("CueNameTable should parse");
+    let names: Vec<_> = cue_names
+        .rows
+        .iter()
+        .map(|row| row["CueName"].as_string().unwrap())
+        .collect();
+    assert_eq!(names, vec!["3001_01", "3001_01_alt"]);
+
+    let waveform = UtfTable::new(Cursor::new(row["WaveformTable"].as_bytes().unwrap()))
+        .expect("WaveformTable should parse");
+    assert_eq!(waveform.rows.len(), 1);
+    assert_eq!(waveform.rows[0]["MemoryAwbId"].as_int(), Some(0));
+    assert_eq!(waveform.rows[0]["EncodeType"].as_int(), Some(2));
+    assert_eq!(waveform.rows[0]["NumChannels"].as_int(), Some(2));
+    assert_eq!(waveform.rows[0]["SamplingRate"].as_int(), Some(44_100));
+
+    let dir = tempfile::tempdir().unwrap();
+    let extracted = cridecoder::extract_acb(Cursor::new(output), dir.path(), None)
+        .expect("Music ACB should be extractable");
+    assert_eq!(
+        extracted.len(),
+        2,
+        "Music ACB should expose base and virtual cues"
+    );
+}
+
 /// Test AFS2 archive builder
 #[test]
 fn test_afs_archive_builder() {

@@ -15,7 +15,7 @@ mod python;
 
 // ACB/AWB exports
 pub use acb::{extract_acb, extract_acb_from_file};
-pub use acb::{AcbBuilder, AfsArchiveBuilder, TrackInput, UtfTableBuilder};
+pub use acb::{AcbBuilder, AfsArchiveBuilder, BuilderError, TrackInput, UtfTableBuilder};
 
 // HCA exports
 pub use hca::{encode_wav_to_hca, HcaEncoder, HcaEncoderConfig, HcaEncoderError};

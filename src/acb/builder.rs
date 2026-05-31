@@ -3,7 +3,7 @@
 use crate::acb::consts::*;
 use crate::acb::utf::Value;
 use encoding_rs::SHIFT_JIS;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Seek, Write};
 use thiserror::Error;
 
@@ -19,6 +19,20 @@ pub enum BuilderError {
     InvalidAudioData,
     #[error("Unsupported audio format")]
     UnsupportedFormat,
+    #[error("Too many tracks for ACB builder: {0}")]
+    TooManyTracks(usize),
+    #[error("Cue ID exceeds WaveformTable 16-bit limit: {0}")]
+    CueIdTooLarge(u32),
+    #[error("Duplicate cue ID: {0}")]
+    DuplicateCueId(u32),
+    #[error("music ACB builder requires exactly one track, got {0}")]
+    MusicAcbRequiresSingleTrack(usize),
+    #[error("{field} must be {expected} bytes, got {actual}")]
+    InvalidFixedDataLength {
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 /// Audio track input for ACB building
@@ -52,6 +66,109 @@ impl TrackInput {
             _ => WAVEFORM_ENCODE_TYPE_HCA,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HcaTrackInfo {
+    channels: u8,
+    sampling_rate: u16,
+    num_samples: u32,
+    length_ms: u32,
+}
+
+impl HcaTrackInfo {
+    fn from_hca_with_reference(
+        data: &[u8],
+        reference_num_samples: u32,
+        reference_length_ms: u32,
+    ) -> Self {
+        let Some(fmt_offset) = data.windows(4).position(|window| window == b"fmt\0") else {
+            return Self::with_reference(reference_num_samples, reference_length_ms);
+        };
+
+        if fmt_offset + 12 > data.len() {
+            return Self::with_reference(reference_num_samples, reference_length_ms);
+        }
+
+        let channels = data[fmt_offset + 4].max(1);
+        let sampling_rate = u32::from_be_bytes([
+            0,
+            data[fmt_offset + 5],
+            data[fmt_offset + 6],
+            data[fmt_offset + 7],
+        ]);
+        let frame_count = u32::from_be_bytes([
+            data[fmt_offset + 8],
+            data[fmt_offset + 9],
+            data[fmt_offset + 10],
+            data[fmt_offset + 11],
+        ]);
+
+        if sampling_rate == 0 || frame_count == 0 {
+            return Self::with_reference(reference_num_samples, reference_length_ms);
+        }
+
+        let num_samples = frame_count.saturating_mul(1024);
+        let length_ms = ((num_samples as u64 * 1000) / sampling_rate as u64) as u32;
+        if length_ms >= reference_length_ms {
+            return Self::with_reference(reference_num_samples, reference_length_ms);
+        }
+
+        Self {
+            channels,
+            sampling_rate: sampling_rate.min(u16::MAX as u32) as u16,
+            num_samples: if num_samples == 0 {
+                reference_num_samples
+            } else {
+                num_samples
+            },
+            length_ms: if length_ms == 0 {
+                reference_length_ms
+            } else {
+                length_ms
+            },
+        }
+    }
+
+    fn with_reference(num_samples: u32, length_ms: u32) -> Self {
+        Self {
+            channels: 2,
+            sampling_rate: 44_100,
+            num_samples,
+            length_ms,
+        }
+    }
+}
+
+impl Default for HcaTrackInfo {
+    fn default() -> Self {
+        Self {
+            channels: 2,
+            sampling_rate: 44_100,
+            num_samples: 5_831_458,
+            length_ms: 132_232,
+        }
+    }
+}
+
+/// Options for building a single-track music cue sheet ACB.
+#[derive(Debug, Clone)]
+struct MusicAcbConfig {
+    cue_id: u32,
+    memory_awb_id: u16,
+    virtual_cue_suffix: Option<String>,
+    reference_num_samples: u32,
+    reference_length_ms: u32,
+    acb_version: u32,
+    acf_md5_hash: Vec<u8>,
+    acb_guid: Vec<u8>,
+    version_string: String,
+    acb_volume: f32,
+    category_extension: u8,
+    cue_priority_type: u8,
+    acf_category_name: String,
+    acf_category_id: u32,
+    acf_bus_names: Vec<String>,
 }
 
 // ============================================================================
@@ -104,7 +221,10 @@ pub struct UtfTableBuilder {
     pub table_name: String,
     pub columns: Vec<ColumnDef>,
     pub rows: Vec<HashMap<String, Value>>,
-    data_alignment: u32,
+    data_offset_alignment: u32,
+    table_alignment: u32,
+    data_item_alignment: u32,
+    encoding: u16,
 }
 
 impl UtfTableBuilder {
@@ -113,7 +233,10 @@ impl UtfTableBuilder {
             table_name: table_name.into(),
             columns: Vec::new(),
             rows: Vec::new(),
-            data_alignment: 32,
+            data_offset_alignment: 32,
+            table_alignment: 32,
+            data_item_alignment: 1,
+            encoding: 0,
         }
     }
 
@@ -124,6 +247,26 @@ impl UtfTableBuilder {
 
     pub fn add_row(&mut self, row: HashMap<String, Value>) -> &mut Self {
         self.rows.push(row);
+        self
+    }
+
+    pub fn with_data_item_alignment(mut self, alignment: u32) -> Self {
+        self.data_item_alignment = alignment.max(1);
+        self
+    }
+
+    pub fn with_data_offset_alignment(mut self, alignment: u32) -> Self {
+        self.data_offset_alignment = alignment.max(1);
+        self
+    }
+
+    pub fn with_table_alignment(mut self, alignment: u32) -> Self {
+        self.table_alignment = alignment.max(1);
+        self
+    }
+
+    pub fn with_encoding(mut self, encoding: u16) -> Self {
+        self.encoding = encoding;
         self
     }
 
@@ -150,10 +293,10 @@ impl UtfTableBuilder {
     pub fn build<W: Write + Seek>(&self, writer: &mut W) -> Result<(), BuilderError> {
         // Phase 1: Collect all strings and data blobs
         let mut string_table = StringTable::new();
-        let mut data_table = DataTable::new();
+        let mut data_table = DataTable::new(self.data_item_alignment);
 
         // Add table name
-        let table_name_offset = string_table.add(&self.table_name);
+        let table_name_offset = string_table.add_table_name(&self.table_name);
 
         // Add column names and constant strings/data
         let mut column_name_offsets = Vec::new();
@@ -168,10 +311,11 @@ impl UtfTableBuilder {
                         let off = string_table.add(s);
                         constant_offsets.push(Some((off, 0)));
                     }
-                    Value::Data(d) => {
+                    Value::Data(d) if !d.is_empty() => {
                         let off = data_table.add(d);
                         constant_offsets.push(Some((off, d.len() as u32)));
                     }
+                    Value::Data(_) => constant_offsets.push(None),
                     _ => constant_offsets.push(None),
                 }
             } else {
@@ -193,10 +337,11 @@ impl UtfTableBuilder {
                             let off = string_table.add(s);
                             offsets.insert(col.name.clone(), (off, 0));
                         }
-                        Value::Data(d) => {
+                        Value::Data(d) if !d.is_empty() => {
                             let off = data_table.add(d);
                             offsets.insert(col.name.clone(), (off, d.len() as u32));
                         }
+                        Value::Data(_) => {}
                         _ => {}
                     }
                 }
@@ -230,13 +375,13 @@ impl UtfTableBuilder {
         let rows_offset = schema_offset + schema_size;
         let strings_offset = rows_offset + rows_size;
         let unaligned_data_offset = strings_offset + string_table.len() as u32;
-        let data_offset = align_to(unaligned_data_offset, self.data_alignment);
-        let table_size = align_to(data_offset + data_table.len() as u32, self.data_alignment);
+        let data_offset = align_to(unaligned_data_offset, self.data_offset_alignment);
+        let table_size = align_to(data_offset + data_table.len() as u32, self.table_alignment);
 
         // Phase 3: Write header
         writer.write_all(b"@UTF")?;
         write_u32_be(writer, table_size - 8)?; // table_size (excluding magic and this field)
-        writer.write_all(&[0x00, 0x00])?; // unknown byte + Shift-JIS encoding
+        write_u16_be(writer, self.encoding)?; // unknown byte + character encoding
         write_u16_be(writer, (rows_offset - 8) as u16)?; // rows_offset relative to +8
         write_u32_be(writer, strings_offset - 8)?; // strings_offset relative to +8
         write_u32_be(writer, data_offset - 8)?; // data_offset relative to +8
@@ -347,6 +492,9 @@ impl StringTable {
     }
 
     fn add(&mut self, s: &str) -> u32 {
+        if s.is_empty() {
+            return self.add_table_name(s);
+        }
         if let Some(&offset) = self.offsets.get(s) {
             return offset;
         }
@@ -354,6 +502,13 @@ impl StringTable {
         let encoded = UtfTableBuilder::encode_string(s);
         self.data.extend(encoded);
         self.offsets.insert(s.to_string(), offset);
+        offset
+    }
+
+    fn add_table_name(&mut self, s: &str) -> u32 {
+        let offset = self.data.len() as u32;
+        let encoded = UtfTableBuilder::encode_string(s);
+        self.data.extend(encoded);
         offset
     }
 
@@ -372,15 +527,23 @@ impl StringTable {
 
 struct DataTable {
     data: Vec<u8>,
+    alignment: u32,
 }
 
 impl DataTable {
-    fn new() -> Self {
-        Self { data: Vec::new() }
+    fn new(alignment: u32) -> Self {
+        Self {
+            data: Vec::new(),
+            alignment,
+        }
     }
 
     fn add(&mut self, d: &[u8]) -> u32 {
-        let offset = self.data.len() as u32;
+        let aligned_len = align_to(self.data.len() as u32, self.alignment) as usize;
+        if aligned_len > self.data.len() {
+            self.data.resize(aligned_len, 0);
+        }
+        let offset = aligned_len as u32;
         self.data.extend(d);
         offset
     }
@@ -536,6 +699,7 @@ pub struct AcbBuilder {
     tracks: Vec<TrackInput>,
     acb_version: u32,
     streaming_awb: bool,
+    music_acb_config: Option<MusicAcbConfig>,
 }
 
 impl AcbBuilder {
@@ -544,6 +708,7 @@ impl AcbBuilder {
             tracks: Vec::new(),
             acb_version: 0x01300500, // Common ACB version
             streaming_awb: false,
+            music_acb_config: None,
         }
     }
 
@@ -557,6 +722,44 @@ impl AcbBuilder {
         self
     }
 
+    pub fn music_acb(
+        mut self,
+        cue_id: u32,
+        virtual_cue_suffix: Option<String>,
+        memory_awb_id: u16,
+        reference_num_samples: u32,
+        reference_length_ms: u32,
+        acb_version: u32,
+        acf_md5_hash: Vec<u8>,
+        acb_guid: Vec<u8>,
+        version_string: String,
+        acb_volume: f32,
+        category_extension: u8,
+        cue_priority_type: u8,
+        acf_category_name: String,
+        acf_category_id: u32,
+        acf_bus_names: Vec<String>,
+    ) -> Self {
+        self.music_acb_config = Some(MusicAcbConfig {
+            cue_id,
+            memory_awb_id,
+            virtual_cue_suffix,
+            reference_num_samples,
+            reference_length_ms,
+            acb_version,
+            acf_md5_hash,
+            acb_guid,
+            version_string,
+            acb_volume,
+            category_extension,
+            cue_priority_type,
+            acf_category_name,
+            acf_category_id,
+            acf_bus_names,
+        });
+        self
+    }
+
     /// Build the ACB file and optionally AWB file
     pub fn build<W: Write + Seek>(
         &self,
@@ -565,6 +768,11 @@ impl AcbBuilder {
     ) -> Result<(), BuilderError> {
         if self.tracks.is_empty() {
             return Err(BuilderError::NoTracks);
+        }
+        self.validate_tracks()?;
+
+        if let Some(config) = &self.music_acb_config {
+            return self.build_music_acb(acb_writer, config);
         }
 
         // Build AWB archive (embedded or external)
@@ -657,6 +865,774 @@ impl AcbBuilder {
         Ok(())
     }
 
+    fn build_music_acb<W: Write + Seek>(
+        &self,
+        acb_writer: &mut W,
+        config: &MusicAcbConfig,
+    ) -> Result<(), BuilderError> {
+        if self.tracks.len() != 1 {
+            return Err(BuilderError::MusicAcbRequiresSingleTrack(self.tracks.len()));
+        }
+        Self::validate_fixed_data("acf_md5_hash", &config.acf_md5_hash, 16)?;
+        Self::validate_fixed_data("acb_guid", &config.acb_guid, 16)?;
+
+        let track = &self.tracks[0];
+        let info = HcaTrackInfo::from_hca_with_reference(
+            &track.data,
+            config.reference_num_samples,
+            config.reference_length_ms,
+        );
+
+        let mut awb_data = Vec::new();
+        {
+            let mut awb_cursor = std::io::Cursor::new(&mut awb_data);
+            let mut awb_builder = AfsArchiveBuilder::new();
+            awb_builder.add_file(config.memory_awb_id as u32, track.data.clone());
+            awb_builder.build(&mut awb_cursor)?;
+        }
+
+        let header = self.build_music_row_header_table(track, info, awb_data, config)?;
+        acb_writer.write_all(&header)?;
+        Ok(())
+    }
+
+    fn build_music_row_header_table(
+        &self,
+        track: &TrackInput,
+        info: HcaTrackInfo,
+        awb_data: Vec<u8>,
+        config: &MusicAcbConfig,
+    ) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("Header").with_data_item_alignment(32);
+        let mut row = HashMap::new();
+
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "FileIdentifier",
+            COLUMN_TYPE_4BYTE,
+            Value::U32(0),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "Size",
+            COLUMN_TYPE_4BYTE,
+            Value::U32(0),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "Version",
+            COLUMN_TYPE_4BYTE,
+            Value::U32(config.acb_version),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "Type",
+            COLUMN_TYPE_1BYTE,
+            Value::U8(0),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "Target",
+            COLUMN_TYPE_1BYTE,
+            Value::U8(0),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "AcfMd5Hash",
+            COLUMN_TYPE_DATA,
+            Value::Data(config.acf_md5_hash.clone()),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "CategoryExtension",
+            COLUMN_TYPE_1BYTE,
+            Value::U8(config.category_extension),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "CueTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_cue_table(info, config)?),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "CueNameTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_cue_name_table(track, config)?),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "WaveformTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_waveform_table(track, info, config)?),
+        );
+        for name in [
+            "AisacTable",
+            "GraphTable",
+            "GlobalAisacReferenceTable",
+            "AisacNameTable",
+        ] {
+            Self::add_row_value(
+                &mut table,
+                &mut row,
+                name,
+                COLUMN_TYPE_DATA,
+                Value::Data(Vec::new()),
+            );
+        }
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "SynthTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_synth_table(config)?),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "SeqCommandTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_seq_command_table(config)?),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "TrackTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_track_table(config)?),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "SequenceTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_sequence_table(config)?),
+        );
+        for name in [
+            "AisacControlNameTable",
+            "AutoModulationTable",
+            "StreamAwbTocWorkOld",
+        ] {
+            Self::add_row_value(
+                &mut table,
+                &mut row,
+                name,
+                COLUMN_TYPE_DATA,
+                Value::Data(Vec::new()),
+            );
+        }
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "AwbFile",
+            COLUMN_TYPE_DATA,
+            Value::Data(awb_data),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "VersionString",
+            COLUMN_TYPE_STRING,
+            Value::String(config.version_string.clone()),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "CueLimitWorkTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(Vec::new()),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "NumCueLimitListWorks",
+            COLUMN_TYPE_2BYTE,
+            Value::U16(0),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "NumCueLimitNodeWorks",
+            COLUMN_TYPE_2BYTE,
+            Value::U16(0),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "AcbGuid",
+            COLUMN_TYPE_DATA,
+            Value::Data(config.acb_guid.clone()),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "StreamAwbHash",
+            COLUMN_TYPE_DATA,
+            Value::Data(vec![0; 16]),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "StreamAwbTocWork_Old",
+            COLUMN_TYPE_DATA,
+            Value::Data(Vec::new()),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "AcbVolume",
+            COLUMN_TYPE_FLOAT,
+            Value::F32(config.acb_volume),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "StringValueTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_string_value_table(config)?),
+        );
+        for name in ["OutsideLinkTable", "BlockSequenceTable", "BlockTable"] {
+            Self::add_row_value(
+                &mut table,
+                &mut row,
+                name,
+                COLUMN_TYPE_DATA,
+                Value::Data(Vec::new()),
+            );
+        }
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "Name",
+            COLUMN_TYPE_STRING,
+            Value::String(track.name.clone()),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "CharacterEncodingType",
+            COLUMN_TYPE_1BYTE,
+            Value::U8(0),
+        );
+        for name in ["EventTable", "ActionTrackTable"] {
+            Self::add_row_value(
+                &mut table,
+                &mut row,
+                name,
+                COLUMN_TYPE_DATA,
+                Value::Data(Vec::new()),
+            );
+        }
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "AcfReferenceTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_acf_reference_table(config)?),
+        );
+        for name in ["WaveformExtensionDataTable", "BeatSyncInfoTable"] {
+            Self::add_row_value(
+                &mut table,
+                &mut row,
+                name,
+                COLUMN_TYPE_DATA,
+                Value::Data(Vec::new()),
+            );
+        }
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "CuePriorityType",
+            COLUMN_TYPE_1BYTE,
+            Value::U8(config.cue_priority_type),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "NumCueLimit",
+            COLUMN_TYPE_2BYTE,
+            Value::U16(0),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "TrackCommandTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(Vec::new()),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "SynthCommandTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_synth_command_table()?),
+        );
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "TrackEventTable",
+            COLUMN_TYPE_DATA,
+            Value::Data(self.build_music_track_event_table(config)?),
+        );
+        for name in [
+            "SeqParameterPalletTable",
+            "TrackParameterPalletTable",
+            "SynthParameterPalletTable",
+            "SoundGeneratorTable",
+            "InstrumentPluginTrackTable",
+            "InstrumentPluginParameterTable",
+        ] {
+            Self::add_row_value(
+                &mut table,
+                &mut row,
+                name,
+                COLUMN_TYPE_DATA,
+                Value::Data(Vec::new()),
+            );
+        }
+        Self::add_row_value(&mut table, &mut row, "R8", COLUMN_TYPE_1BYTE, Value::U8(0));
+        Self::add_row_value(
+            &mut table,
+            &mut row,
+            "ProjectKey",
+            COLUMN_TYPE_DATA,
+            Value::Data(Vec::new()),
+        );
+        for name in ["R6", "R5", "R4", "R3", "R2", "R1", "R0"] {
+            Self::add_row_value(&mut table, &mut row, name, COLUMN_TYPE_1BYTE, Value::U8(0));
+        }
+        for name in ["PaddingArea", "StreamAwbTocWork", "StreamAwbAfs2Header"] {
+            Self::add_row_value(
+                &mut table,
+                &mut row,
+                name,
+                COLUMN_TYPE_DATA,
+                Value::Data(Vec::new()),
+            );
+        }
+
+        table.add_row(row);
+        Self::finish_table(table)
+    }
+
+    fn validate_tracks(&self) -> Result<(), BuilderError> {
+        if self.tracks.len() > u16::MAX as usize {
+            return Err(BuilderError::TooManyTracks(self.tracks.len()));
+        }
+
+        if let Some(config) = &self.music_acb_config {
+            let last_cue_id = config
+                .cue_id
+                .saturating_add(Self::music_cue_count(config) as u32)
+                .saturating_sub(1);
+            if last_cue_id > u16::MAX as u32 {
+                return Err(BuilderError::CueIdTooLarge(last_cue_id));
+            }
+        }
+
+        let mut cue_ids = HashSet::with_capacity(self.tracks.len());
+        for track in &self.tracks {
+            if track.cue_id > u16::MAX as u32 {
+                return Err(BuilderError::CueIdTooLarge(track.cue_id));
+            }
+            if !cue_ids.insert(track.cue_id) {
+                return Err(BuilderError::DuplicateCueId(track.cue_id));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn finish_table(table: UtfTableBuilder) -> Result<Vec<u8>, BuilderError> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        table.build(&mut buf)?;
+        Ok(buf.into_inner())
+    }
+
+    fn finish_music_nested_table(table: UtfTableBuilder) -> Result<Vec<u8>, BuilderError> {
+        Self::finish_table(
+            table
+                .with_encoding(1)
+                .with_data_offset_alignment(1)
+                .with_table_alignment(4),
+        )
+    }
+
+    fn validate_fixed_data(
+        field: &'static str,
+        data: &[u8],
+        expected: usize,
+    ) -> Result<(), BuilderError> {
+        if data.len() != expected {
+            return Err(BuilderError::InvalidFixedDataLength {
+                field,
+                expected,
+                actual: data.len(),
+            });
+        }
+        Ok(())
+    }
+
+    fn add_row_value(
+        table: &mut UtfTableBuilder,
+        row: &mut HashMap<String, Value>,
+        name: &'static str,
+        typ: u8,
+        value: Value,
+    ) {
+        table.add_column(ColumnDef::per_row(name, typ));
+        row.insert(name.to_string(), value);
+    }
+
+    fn music_cue_names(track: &TrackInput, config: &MusicAcbConfig) -> Vec<String> {
+        let mut names = vec![track.name.clone()];
+        if let Some(suffix) = &config.virtual_cue_suffix {
+            names.push(format!("{}{}", track.name, suffix));
+        }
+        names
+    }
+
+    fn music_cue_count(config: &MusicAcbConfig) -> u16 {
+        if config.virtual_cue_suffix.is_some() {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn build_music_cue_table(
+        &self,
+        info: HcaTrackInfo,
+        config: &MusicAcbConfig,
+    ) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("Cue");
+
+        table.add_column(ColumnDef::per_row("CueId", COLUMN_TYPE_4BYTE));
+        table.add_column(ColumnDef::constant("ReferenceType", Value::U8(3)));
+        table.add_column(ColumnDef::per_row("ReferenceIndex", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::constant(
+            "UserData",
+            Value::String(String::new()),
+        ));
+        table.add_column(ColumnDef::constant("Worksize", Value::U16(0)));
+        table.add_column(ColumnDef::constant(
+            "AisacControlMap",
+            Value::Data(Vec::new()),
+        ));
+        table.add_column(ColumnDef::constant("Length", Value::U32(info.length_ms)));
+        table.add_column(ColumnDef::constant("NumAisacControlMaps", Value::U8(0)));
+        table.add_column(ColumnDef::constant("HeaderVisibility", Value::U8(1)));
+        table.add_column(ColumnDef::constant("NumRelatedWaveforms", Value::U16(1)));
+
+        for i in 0..Self::music_cue_count(config) {
+            let mut row = HashMap::new();
+            row.insert(
+                "CueId".to_string(),
+                Value::U32(config.cue_id.saturating_add(i as u32)),
+            );
+            row.insert("ReferenceIndex".to_string(), Value::U16(i));
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_cue_name_table(
+        &self,
+        track: &TrackInput,
+        config: &MusicAcbConfig,
+    ) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("CueName");
+
+        table.add_column(ColumnDef::per_row("CueName", COLUMN_TYPE_STRING));
+        table.add_column(ColumnDef::per_row("CueIndex", COLUMN_TYPE_2BYTE));
+
+        for (i, name) in Self::music_cue_names(track, config).into_iter().enumerate() {
+            let mut row = HashMap::new();
+            row.insert("CueName".to_string(), Value::String(name));
+            row.insert("CueIndex".to_string(), Value::U16(i as u16));
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_waveform_table(
+        &self,
+        track: &TrackInput,
+        info: HcaTrackInfo,
+        config: &MusicAcbConfig,
+    ) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("Waveform");
+
+        table.add_column(ColumnDef::per_row("MemoryAwbId", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("EncodeType", COLUMN_TYPE_1BYTE));
+        table.add_column(ColumnDef::per_row("Streaming", COLUMN_TYPE_1BYTE));
+        table.add_column(ColumnDef::per_row("NumChannels", COLUMN_TYPE_1BYTE));
+        table.add_column(ColumnDef::per_row("LoopFlag", COLUMN_TYPE_1BYTE));
+        table.add_column(ColumnDef::per_row("SamplingRate", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("NumSamples", COLUMN_TYPE_4BYTE));
+        table.add_column(ColumnDef::per_row("ExtensionData", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("StreamAwbPortNo", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("StreamAwbId", COLUMN_TYPE_2BYTE));
+
+        let mut row = HashMap::new();
+        row.insert("MemoryAwbId".to_string(), Value::U16(config.memory_awb_id));
+        row.insert("EncodeType".to_string(), Value::U8(track.encode_type as u8));
+        row.insert("Streaming".to_string(), Value::U8(0));
+        row.insert("NumChannels".to_string(), Value::U8(info.channels));
+        row.insert("LoopFlag".to_string(), Value::U8(1));
+        row.insert("SamplingRate".to_string(), Value::U16(info.sampling_rate));
+        row.insert("NumSamples".to_string(), Value::U32(info.num_samples));
+        row.insert("ExtensionData".to_string(), Value::U16(0xffff));
+        row.insert("StreamAwbPortNo".to_string(), Value::U16(0xffff));
+        row.insert("StreamAwbId".to_string(), Value::U16(0xffff));
+        table.add_row(row);
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_synth_table(&self, config: &MusicAcbConfig) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("Synth");
+
+        table.add_column(ColumnDef::constant("Type", Value::U8(0)));
+        table.add_column(ColumnDef::constant(
+            "VoiceLimitGroupName",
+            Value::String(String::new()),
+        ));
+        table.add_column(ColumnDef::per_row("CommandIndex", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("ReferenceItems", COLUMN_TYPE_DATA));
+        table.add_column(ColumnDef::constant("LocalAisacs", Value::Data(Vec::new())));
+        table.add_column(ColumnDef::constant(
+            "GlobalAisacStartIndex",
+            Value::U16(0xffff),
+        ));
+        table.add_column(ColumnDef::constant("GlobalAisacNumRefs", Value::U16(0)));
+        table.add_column(ColumnDef::per_row("ControlWorkArea1", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("ControlWorkArea2", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::constant("TrackValues", Value::Data(Vec::new())));
+        table.add_column(ColumnDef::constant("ParameterPallet", Value::U16(0xffff)));
+        table.add_column(ColumnDef::constant(
+            "ActionTrackStartIndex",
+            Value::U16(0xffff),
+        ));
+        table.add_column(ColumnDef::constant("NumActionTracks", Value::U16(0)));
+
+        for i in 0..Self::music_cue_count(config) {
+            let mut row = HashMap::new();
+            row.insert(
+                "CommandIndex".to_string(),
+                Value::U16(if i == 0 { 0xffff } else { 0 }),
+            );
+            row.insert(
+                "ReferenceItems".to_string(),
+                Value::Data(vec![0x00, 0x01, 0x00, 0x00]),
+            );
+            row.insert("ControlWorkArea1".to_string(), Value::U16(i));
+            row.insert("ControlWorkArea2".to_string(), Value::U16(i));
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_seq_command_table(
+        &self,
+        config: &MusicAcbConfig,
+    ) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("SequenceCommand");
+        table.add_column(ColumnDef::per_row("Command", COLUMN_TYPE_DATA));
+
+        let commands = [
+            vec![
+                0x00, 0x41, 0x04, 0x00, 0x00, 0x00, 0x05, 0x00, 0x45, 0x04, 0x41, 0xf0, 0x00, 0x00,
+                0x00, 0x6f, 0x04, 0x00, 0x00, 0x27, 0x10,
+            ],
+            vec![
+                0x00, 0x41, 0x04, 0x00, 0x00, 0x00, 0x05, 0x00, 0x45, 0x04, 0x41, 0xf0, 0x00, 0x00,
+                0x00, 0x6f, 0x04, 0x00, 0x00, 0x23, 0x28, 0x00, 0x6f, 0x04, 0x00, 0x01, 0x13, 0x88,
+                0x00, 0x6f, 0x04, 0x00, 0x03, 0x13, 0x88,
+            ],
+        ];
+        for command in commands
+            .into_iter()
+            .take(Self::music_cue_count(config) as usize)
+        {
+            let mut row = HashMap::new();
+            row.insert("Command".to_string(), Value::Data(command));
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_track_table(&self, config: &MusicAcbConfig) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("Track");
+
+        table.add_column(ColumnDef::per_row("EventIndex", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::constant("CommandIndex", Value::U16(0xffff)));
+        table.add_column(ColumnDef::constant("LocalAisacs", Value::Data(Vec::new())));
+        table.add_column(ColumnDef::constant(
+            "GlobalAisacStartIndex",
+            Value::U16(0xffff),
+        ));
+        table.add_column(ColumnDef::constant("GlobalAisacNumRefs", Value::U16(0)));
+        table.add_column(ColumnDef::constant("ParameterPallet", Value::U16(0xffff)));
+        table.add_column(ColumnDef::constant("TargetType", Value::U8(0)));
+        table.add_column(ColumnDef::constant(
+            "TargetName",
+            Value::String(String::new()),
+        ));
+        table.add_column(ColumnDef::constant("TargetId", Value::U32(u32::MAX)));
+        table.add_column(ColumnDef::constant(
+            "TargetAcbName",
+            Value::String(String::new()),
+        ));
+        table.add_column(ColumnDef::constant("Scope", Value::U8(0)));
+        table.add_column(ColumnDef::constant("TargetTrackNo", Value::U16(0xffff)));
+
+        for i in 0..Self::music_cue_count(config) {
+            let mut row = HashMap::new();
+            row.insert("EventIndex".to_string(), Value::U16(i));
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_sequence_table(&self, config: &MusicAcbConfig) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("Sequence");
+
+        table.add_column(ColumnDef::constant("PlaybackRatio", Value::U16(100)));
+        table.add_column(ColumnDef::constant("NumTracks", Value::U16(1)));
+        table.add_column(ColumnDef::per_row("TrackIndex", COLUMN_TYPE_DATA));
+        table.add_column(ColumnDef::per_row("CommandIndex", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::constant("LocalAisacs", Value::Data(Vec::new())));
+        table.add_column(ColumnDef::constant(
+            "GlobalAisacStartIndex",
+            Value::U16(0xffff),
+        ));
+        table.add_column(ColumnDef::constant("GlobalAisacNumRefs", Value::U16(0)));
+        table.add_column(ColumnDef::constant("ParameterPallet", Value::U16(0xffff)));
+        table.add_column(ColumnDef::constant(
+            "ActionTrackStartIndex",
+            Value::U16(0xffff),
+        ));
+        table.add_column(ColumnDef::constant("NumActionTracks", Value::U16(0)));
+        table.add_column(ColumnDef::constant("TrackValues", Value::Data(Vec::new())));
+        table.add_column(ColumnDef::constant("Type", Value::U8(0)));
+        table.add_column(ColumnDef::per_row("ControlWorkArea1", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("ControlWorkArea2", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::constant(
+            "InstPluginTrackStartIndex",
+            Value::U16(0xffff),
+        ));
+        table.add_column(ColumnDef::constant("NumInstPluginTracks", Value::U16(0)));
+
+        for i in 0..Self::music_cue_count(config) {
+            let mut row = HashMap::new();
+            row.insert(
+                "TrackIndex".to_string(),
+                Value::Data(i.to_be_bytes().to_vec()),
+            );
+            row.insert("CommandIndex".to_string(), Value::U16(i));
+            row.insert("ControlWorkArea1".to_string(), Value::U16(i));
+            row.insert("ControlWorkArea2".to_string(), Value::U16(i));
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_string_value_table(
+        &self,
+        config: &MusicAcbConfig,
+    ) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("Strings");
+        table.add_column(ColumnDef::per_row("StringValue", COLUMN_TYPE_STRING));
+
+        for value in &config.acf_bus_names {
+            let mut row = HashMap::new();
+            row.insert("StringValue".to_string(), Value::String(value.clone()));
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_acf_reference_table(
+        &self,
+        config: &MusicAcbConfig,
+    ) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("AcfReference");
+        table.add_column(ColumnDef::per_row("Type", COLUMN_TYPE_1BYTE));
+        table.add_column(ColumnDef::per_row("Name", COLUMN_TYPE_STRING));
+        table.add_column(ColumnDef::constant("Name2", Value::String(String::new())));
+        table.add_column(ColumnDef::per_row("Id", COLUMN_TYPE_4BYTE));
+
+        let mut category = HashMap::new();
+        category.insert("Type".to_string(), Value::U8(3));
+        category.insert(
+            "Name".to_string(),
+            Value::String(config.acf_category_name.clone()),
+        );
+        category.insert("Id".to_string(), Value::U32(config.acf_category_id));
+        table.add_row(category);
+
+        for name in &config.acf_bus_names {
+            let mut row = HashMap::new();
+            row.insert("Type".to_string(), Value::U8(9));
+            row.insert("Name".to_string(), Value::String(name.clone()));
+            row.insert("Id".to_string(), Value::U32(u32::MAX));
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_synth_command_table(&self) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("SynthCommand");
+        table.add_column(ColumnDef::per_row("Command", COLUMN_TYPE_DATA));
+
+        let mut row = HashMap::new();
+        row.insert(
+            "Command".to_string(),
+            Value::Data(vec![0x00, 0x6f, 0x04, 0x00, 0x03, 0x13, 0x88]),
+        );
+        table.add_row(row);
+
+        Self::finish_music_nested_table(table)
+    }
+
+    fn build_music_track_event_table(
+        &self,
+        config: &MusicAcbConfig,
+    ) -> Result<Vec<u8>, BuilderError> {
+        let mut table = UtfTableBuilder::new("TrackEvent");
+        table.add_column(ColumnDef::per_row("Command", COLUMN_TYPE_DATA));
+
+        for i in 0..Self::music_cue_count(config) {
+            let mut row = HashMap::new();
+            row.insert(
+                "Command".to_string(),
+                Value::Data(Self::synth_command(i as usize)),
+            );
+            table.add_row(row);
+        }
+
+        Self::finish_music_nested_table(table)
+    }
+
     fn build_cue_table(&self) -> Result<Vec<u8>, BuilderError> {
         let mut table = UtfTableBuilder::new("CueTable");
 
@@ -698,11 +1674,13 @@ impl AcbBuilder {
     fn build_sequence_table(&self) -> Result<Vec<u8>, BuilderError> {
         let mut table = UtfTableBuilder::new("SequenceTable");
 
+        table.add_column(ColumnDef::per_row("Type", COLUMN_TYPE_1BYTE));
         table.add_column(ColumnDef::per_row("NumTracks", COLUMN_TYPE_2BYTE));
         table.add_column(ColumnDef::per_row("TrackIndex", COLUMN_TYPE_DATA));
 
         for i in 0..self.tracks.len() {
             let mut row = HashMap::new();
+            row.insert("Type".to_string(), Value::U8(0)); // Polyphonic
             row.insert("NumTracks".to_string(), Value::U16(1));
             row.insert(
                 "TrackIndex".to_string(),
@@ -767,10 +1745,11 @@ impl AcbBuilder {
         table.add_column(ColumnDef::per_row("Streaming", COLUMN_TYPE_1BYTE));
         table.add_column(ColumnDef::per_row("MemoryAwbId", COLUMN_TYPE_2BYTE));
         table.add_column(ColumnDef::per_row("StreamAwbId", COLUMN_TYPE_2BYTE));
+        table.add_column(ColumnDef::per_row("StreamAwbPortNo", COLUMN_TYPE_2BYTE));
 
-        for (i, track) in self.tracks.iter().enumerate() {
+        for track in &self.tracks {
             let mut row = HashMap::new();
-            row.insert("Id".to_string(), Value::U16(i as u16));
+            row.insert("Id".to_string(), Value::U16(track.cue_id as u16));
             row.insert("EncodeType".to_string(), Value::U8(track.encode_type as u8));
             row.insert(
                 "Streaming".to_string(),
@@ -778,11 +1757,23 @@ impl AcbBuilder {
             );
             row.insert(
                 "MemoryAwbId".to_string(),
-                Value::U16(if self.streaming_awb { 0xFFFF } else { i as u16 }),
+                Value::U16(if self.streaming_awb {
+                    0xFFFF
+                } else {
+                    track.cue_id as u16
+                }),
             );
             row.insert(
                 "StreamAwbId".to_string(),
-                Value::U16(if self.streaming_awb { i as u16 } else { 0xFFFF }),
+                Value::U16(if self.streaming_awb {
+                    track.cue_id as u16
+                } else {
+                    0xFFFF
+                }),
+            );
+            row.insert(
+                "StreamAwbPortNo".to_string(),
+                Value::U16(if self.streaming_awb { 0 } else { 0xFFFF }),
             );
             table.add_row(row);
         }
@@ -810,10 +1801,10 @@ impl AcbBuilder {
                 Value::String(String::new()),
             );
 
-            // ReferenceItems: 2-byte count + 2-byte index pairs
+            // ReferenceItems: 2-byte waveform item type + 2-byte waveform index.
             let ref_items = {
                 let mut data = Vec::new();
-                data.extend(&1u16.to_be_bytes()); // count
+                data.extend(&1u16.to_be_bytes()); // waveform item
                 data.extend(&(i as u16).to_be_bytes()); // waveform index
                 data
             };
