@@ -8,7 +8,9 @@ mod extractor;
 mod metadata;
 
 pub use builder::{StreamInput, StreamType, UsmBuilder, UsmBuilderError};
-pub use extractor::{extract_usm, extract_usm_file, UsmError};
+pub use extractor::{
+    extract_usm, extract_usm_file, extract_usm_to_memory, ExtractedUsmStream, UsmError,
+};
 pub use metadata::{
     export_metadata_file, read_metadata, read_metadata_file, Metadata, MetadataSection,
 };

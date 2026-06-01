@@ -7,6 +7,7 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 use std::fs;
 use std::io::Cursor;
@@ -35,6 +36,38 @@ fn extract_acb(acb_path: &str, output_dir: &str) -> PyResult<Option<Vec<String>>
 
     acb::extract_acb_from_file(acb_path, output_dir)
         .map_err(|e| PyRuntimeError::new_err(format!("ACB extraction failed: {}", e)))
+}
+
+/// Extract audio tracks from ACB data into memory.
+///
+/// Args:
+///     acb_data: Raw ACB file data as bytes
+///     acb_path: Optional ACB path, used to resolve external AWB files
+///
+/// Returns:
+///     List of dicts with name, extension, filename, and data bytes
+#[pyfunction]
+#[pyo3(signature = (acb_data, acb_path=None))]
+fn extract_acb_bytes<'py>(
+    py: Python<'py>,
+    acb_data: &[u8],
+    acb_path: Option<String>,
+) -> PyResult<Bound<'py, PyList>> {
+    let acb_path = acb_path.as_deref().map(Path::new);
+    let tracks = acb::extract_acb_to_memory(Cursor::new(acb_data.to_vec()), acb_path)
+        .map_err(|e| PyRuntimeError::new_err(format!("ACB extraction failed: {}", e)))?;
+
+    let list = PyList::empty(py);
+    for track in tracks {
+        let dict = PyDict::new(py);
+        let filename = format!("{}.{}", track.name, track.extension);
+        dict.set_item("name", track.name)?;
+        dict.set_item("extension", track.extension)?;
+        dict.set_item("filename", filename)?;
+        dict.set_item("data", PyBytes::new(py, &track.data))?;
+        list.append(dict)?;
+    }
+    Ok(list)
 }
 
 /// Build an ACB file from track data.
@@ -419,6 +452,50 @@ fn extract_usm(
         .collect())
 }
 
+/// Extract video/audio streams from USM data into memory.
+///
+/// Args:
+///     usm_data: Raw USM file data as bytes
+///     fallback_name: Name used when the USM metadata has no filename
+///     key: Optional decryption key (u64)
+///     export_audio: Whether to export audio streams (default: false)
+///
+/// Returns:
+///     List of dicts with name, extension, filename, and data bytes
+#[pyfunction]
+#[pyo3(signature = (usm_data, fallback_name="input.usm", key=None, export_audio=false))]
+fn extract_usm_bytes<'py>(
+    py: Python<'py>,
+    usm_data: &[u8],
+    fallback_name: &str,
+    key: Option<u64>,
+    export_audio: bool,
+) -> PyResult<Bound<'py, PyList>> {
+    let streams = usm::extract_usm_to_memory(
+        Cursor::new(usm_data.to_vec()),
+        fallback_name.as_bytes(),
+        key,
+        export_audio,
+    )
+    .map_err(|e| PyRuntimeError::new_err(format!("USM extraction failed: {}", e)))?;
+
+    let list = PyList::empty(py);
+    for stream in streams {
+        let dict = PyDict::new(py);
+        let name = Path::new(&stream.filename)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&stream.filename)
+            .to_string();
+        dict.set_item("name", name)?;
+        dict.set_item("extension", stream.extension)?;
+        dict.set_item("filename", stream.filename)?;
+        dict.set_item("data", PyBytes::new(py, &stream.data))?;
+        list.append(dict)?;
+    }
+    Ok(list)
+}
+
 /// Build a USM file from video data.
 ///
 /// Args:
@@ -504,6 +581,7 @@ fn read_usm_metadata(usm_path: &str) -> PyResult<String> {
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ACB functions
     m.add_function(wrap_pyfunction!(extract_acb, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_acb_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(build_music_acb_bytes, m)?)?;
@@ -516,6 +594,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // USM functions
     m.add_function(wrap_pyfunction!(extract_usm, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_usm_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(build_usm, m)?)?;
     m.add_function(wrap_pyfunction!(build_usm_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(read_usm_metadata, m)?)?;

@@ -387,6 +387,23 @@ fn test_acb_from_memory() {
     assert_eq!(tracks.len(), 4, "Should extract 4 tracks from memory");
 }
 
+/// Test extract_acb_to_memory returns track bytes without writing files
+#[test]
+fn test_acb_to_memory() {
+    let acb_path = Path::new("se_0126_01.acb");
+    if !acb_path.exists() {
+        eprintln!("Skipping test: se_0126_01.acb not found");
+        return;
+    }
+
+    let data = fs::read(acb_path).unwrap();
+    let tracks = cridecoder::extract_acb_to_memory(Cursor::new(data), None)
+        .expect("Should extract ACB tracks into memory");
+    assert_eq!(tracks.len(), 4, "Should extract 4 tracks into memory");
+    assert!(tracks.iter().all(|track| track.extension == "hca"));
+    assert!(tracks.iter().all(|track| !track.data.is_empty()));
+}
+
 /// Test extract_usm with in-memory data
 #[test]
 fn test_usm_from_memory() {
@@ -402,6 +419,25 @@ fn test_usm_from_memory() {
         cridecoder::usm::extract_usm(Cursor::new(data), dir.path(), b"0703.usm", None, false);
     let files = result.expect("Should extract from in-memory USM data");
     assert!(!files.is_empty(), "Should extract at least one file");
+}
+
+/// Test extract_usm_to_memory returns stream bytes without writing files
+#[test]
+fn test_usm_to_memory() {
+    let usm_path = Path::new("0703.usm");
+    if !usm_path.exists() {
+        eprintln!("Skipping test: 0703.usm not found");
+        return;
+    }
+
+    let data = fs::read(usm_path).unwrap();
+    let streams =
+        cridecoder::usm::extract_usm_to_memory(Cursor::new(data), b"0703.usm", None, false)
+            .expect("Should extract USM streams into memory");
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].filename, "0703.m2v");
+    assert_eq!(streams[0].extension, "m2v");
+    assert!(!streams[0].data.is_empty());
 }
 
 // =============================================================================

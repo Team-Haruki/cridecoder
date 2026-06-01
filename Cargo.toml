@@ -1,6 +1,6 @@
 [package]
 name = "cridecoder"
-version = "0.1.1"
+version = "0.2.1"
 edition = "2021"
 description = "CRI codec library for ACB/AWB, HCA audio, and USM video extraction"
 license = "MIT"

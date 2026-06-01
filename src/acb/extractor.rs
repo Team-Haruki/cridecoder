@@ -23,6 +23,14 @@ pub enum ExtractError {
     InvalidAcb,
 }
 
+/// Audio track data extracted from an ACB/AWB container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedAcbTrack {
+    pub name: String,
+    pub extension: String,
+    pub data: Vec<u8>,
+}
+
 /// Extract all audio files from an ACB file
 pub fn extract_acb<R: Read + Seek>(
     acb_file: R,
@@ -42,6 +50,21 @@ pub fn extract_acb<R: Read + Seek>(
         &mut embedded_awb,
         &mut external_awbs,
     )
+}
+
+/// Extract all audio tracks from an ACB reader into memory.
+pub fn extract_acb_to_memory<R: Read + Seek>(
+    acb_file: R,
+    acb_file_path: Option<&Path>,
+) -> Result<Vec<ExtractedAcbTrack>, ExtractError> {
+    let utf = UtfTable::new(acb_file)?;
+
+    let track_list = TrackList::new(&utf)?;
+
+    let mut embedded_awb = load_embedded_awb(&utf.rows[0]);
+    let mut external_awbs = load_external_awbs(&utf.rows[0], acb_file_path);
+
+    extract_all_tracks_to_memory(&track_list, &mut embedded_awb, &mut external_awbs)
 }
 
 fn load_embedded_awb(
@@ -120,6 +143,22 @@ fn extract_all_tracks(
     Ok(outputs)
 }
 
+fn extract_all_tracks_to_memory(
+    track_list: &TrackList,
+    embedded_awb: &mut Option<AfsArchive<Cursor<Vec<u8>>>>,
+    external_awbs: &mut [AfsArchive<Cursor<Vec<u8>>>],
+) -> Result<Vec<ExtractedAcbTrack>, ExtractError> {
+    let mut outputs = Vec::new();
+
+    for track in &track_list.tracks {
+        if let Some(output) = extract_single_track_to_memory(track, embedded_awb, external_awbs)? {
+            outputs.push(output);
+        }
+    }
+
+    Ok(outputs)
+}
+
 fn extract_single_track(
     track: &Track,
     target_dir: &Path,
@@ -144,6 +183,31 @@ fn extract_single_track(
 
     fs::write(&output_path, data)?;
     Ok(Some(output_path.to_string_lossy().into_owned()))
+}
+
+fn extract_single_track_to_memory(
+    track: &Track,
+    embedded_awb: &mut Option<AfsArchive<Cursor<Vec<u8>>>>,
+    external_awbs: &mut [AfsArchive<Cursor<Vec<u8>>>],
+) -> Result<Option<ExtractedAcbTrack>, ExtractError> {
+    let ext = wave_type_extension(track.enc_type);
+    let extension = if ext.is_empty() {
+        track.enc_type.to_string()
+    } else {
+        ext.trim_start_matches('.').to_string()
+    };
+
+    let data = get_track_data(track, embedded_awb, external_awbs)?;
+    let data = match data {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+
+    Ok(Some(ExtractedAcbTrack {
+        name: track.name.clone(),
+        extension,
+        data,
+    }))
 }
 
 fn get_track_data(

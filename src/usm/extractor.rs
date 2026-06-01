@@ -66,6 +66,14 @@ pub type UtfRow = std::collections::HashMap<String, UtfValue>;
 /// A UTF table
 pub type UtfTable = Vec<UtfRow>;
 
+/// A stream extracted from a USM container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedUsmStream {
+    pub filename: String,
+    pub extension: String,
+    pub data: Vec<u8>,
+}
+
 /// Read column data from a UTF table
 fn read_column_data<R: Read + Seek>(
     reader: &mut Reader<R>,
@@ -352,6 +360,57 @@ pub fn extract_usm<R: Read + Seek>(
     Ok(output_files)
 }
 
+/// Extract USM video/audio streams into memory.
+pub fn extract_usm_to_memory<R: Read + Seek>(
+    usm: R,
+    fallback_name: &[u8],
+    key: Option<u64>,
+    export_audio: bool,
+) -> Result<Vec<ExtractedUsmStream>, UsmError> {
+    let mut reader = Reader::new(usm);
+
+    let (vmask, amask) = key.map(get_mask).unzip();
+
+    let (filename, has_audio) = parse_usm_header(&mut reader, fallback_name)?;
+    let decoded_filename = decode_shift_jis(&filename);
+
+    let base_name = Path::new(&decoded_filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&decoded_filename)
+        .to_string();
+
+    let mut video = Vec::new();
+    let mut audio = if has_audio && export_audio {
+        Some(Vec::new())
+    } else {
+        None
+    };
+
+    extract_usm_chunks(
+        &mut reader,
+        &mut video,
+        audio.as_mut(),
+        vmask.as_ref(),
+        amask.as_ref(),
+    )?;
+
+    let mut streams = vec![ExtractedUsmStream {
+        filename: format!("{base_name}.m2v"),
+        extension: "m2v".to_string(),
+        data: video,
+    }];
+    if let Some(audio) = audio {
+        streams.push(ExtractedUsmStream {
+            filename: format!("{base_name}.adx"),
+            extension: "adx".to_string(),
+            data: audio,
+        });
+    }
+
+    Ok(streams)
+}
+
 /// Parse USM header
 fn parse_usm_header<R: Read + Seek>(
     reader: &mut Reader<R>,
@@ -511,10 +570,10 @@ fn create_output_files(
 }
 
 /// Extract USM chunks
-fn extract_usm_chunks<R: Read + Seek>(
+fn extract_usm_chunks<R: Read + Seek, V: Write, A: Write>(
     reader: &mut Reader<R>,
-    video_file: &mut File,
-    mut audio_file: Option<&mut File>,
+    video_file: &mut V,
+    mut audio_file: Option<&mut A>,
     vmask: Option<&Vec<Vec<u8>>>,
     amask: Option<&Vec<u8>>,
 ) -> Result<(), UsmError> {
@@ -558,13 +617,13 @@ fn extract_usm_chunks<R: Read + Seek>(
 
 /// Process a chunk
 #[allow(clippy::too_many_arguments)]
-fn process_chunk<R: Read + Seek>(
+fn process_chunk<R: Read + Seek, V: Write, A: Write>(
     reader: &mut Reader<R>,
     sig: &[u8],
     read_data_len: usize,
     data_type: u8,
-    video_file: &mut File,
-    audio_file: &mut Option<&mut File>,
+    video_file: &mut V,
+    audio_file: &mut Option<&mut A>,
     vmask: Option<&Vec<Vec<u8>>>,
     amask: Option<&Vec<u8>>,
 ) -> Result<(), UsmError> {

@@ -12,6 +12,6 @@ pub use builder::{
     AcbBuilder, AfsArchiveBuilder, BuilderError, ColumnDef, TrackInput, UtfTableBuilder,
 };
 pub use consts::*;
-pub use extractor::{extract_acb, extract_acb_from_file};
+pub use extractor::{extract_acb, extract_acb_from_file, extract_acb_to_memory, ExtractedAcbTrack};
 pub use track::{Track, TrackList};
 pub use utf::{UtfHeader, UtfTable, Value};
