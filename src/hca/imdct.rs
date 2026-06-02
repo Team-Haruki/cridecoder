@@ -221,30 +221,36 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
             let mut d2_idx = count2;
             let mut t1_idx = 0usize;
 
-            for _ in 0..count1 {
-                for _ in 0..count2 {
-                    let (a, b) = if use_temp_as_src {
-                        (ch.temp[t1_idx], ch.temp[t1_idx + 1])
-                    } else {
-                        (
-                            ch.spectra[subframe][t1_idx],
-                            ch.spectra[subframe][t1_idx + 1],
-                        )
-                    };
-                    t1_idx += 2;
+            if use_temp_as_src {
+                for _ in 0..count1 {
+                    for _ in 0..count2 {
+                        let a = ch.temp[t1_idx];
+                        let b = ch.temp[t1_idx + 1];
+                        t1_idx += 2;
 
-                    if use_temp_as_src {
                         ch.spectra[subframe][d1_idx] = a + b;
                         ch.spectra[subframe][d2_idx] = a - b;
-                    } else {
+                        d1_idx += 1;
+                        d2_idx += 1;
+                    }
+                    d1_idx += count2;
+                    d2_idx += count2;
+                }
+            } else {
+                for _ in 0..count1 {
+                    for _ in 0..count2 {
+                        let a = ch.spectra[subframe][t1_idx];
+                        let b = ch.spectra[subframe][t1_idx + 1];
+                        t1_idx += 2;
+
                         ch.temp[d1_idx] = a + b;
                         ch.temp[d2_idx] = a - b;
+                        d1_idx += 1;
+                        d2_idx += 1;
                     }
-                    d1_idx += 1;
-                    d2_idx += 1;
+                    d1_idx += count2;
+                    d2_idx += count2;
                 }
-                d1_idx += count2;
-                d2_idx += count2;
             }
 
             use_temp_as_src = !use_temp_as_src;
@@ -259,13 +265,15 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
     {
         let mut count1 = half;
         let mut count2 = 1usize;
+        let sin_tables = &*SIN_TABLES;
+        let cos_tables = &*COS_TABLES;
 
         // After pre-rotation, data is in temp, output goes to spectra
         let mut use_temp_as_src = true;
 
         for i in 0..mdct_bits {
-            let sin_table = &SIN_TABLES[i];
-            let cos_table = &COS_TABLES[i];
+            let sin_table = &sin_tables[i];
+            let cos_table = &cos_tables[i];
             let mut sin_idx = 0;
             let mut cos_idx = 0;
 
@@ -274,35 +282,52 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
             let mut s1_idx = 0usize;
             let mut s2_idx = count2;
 
-            for _ in 0..count1 {
-                for _ in 0..count2 {
-                    let (a, b) = if use_temp_as_src {
-                        (ch.temp[s1_idx], ch.temp[s2_idx])
-                    } else {
-                        (ch.spectra[subframe][s1_idx], ch.spectra[subframe][s2_idx])
-                    };
-                    s1_idx += 1;
-                    s2_idx += 1;
+            if use_temp_as_src {
+                for _ in 0..count1 {
+                    for _ in 0..count2 {
+                        let a = ch.temp[s1_idx];
+                        let b = ch.temp[s2_idx];
+                        s1_idx += 1;
+                        s2_idx += 1;
 
-                    let sin = sin_table[sin_idx];
-                    let cos = cos_table[cos_idx];
-                    sin_idx += 1;
-                    cos_idx += 1;
+                        let sin = sin_table[sin_idx];
+                        let cos = cos_table[cos_idx];
+                        sin_idx += 1;
+                        cos_idx += 1;
 
-                    if use_temp_as_src {
                         ch.spectra[subframe][d1_idx] = a * sin - b * cos;
                         ch.spectra[subframe][d2_idx] = a * cos + b * sin;
-                    } else {
+                        d1_idx += 1;
+                        d2_idx -= 1;
+                    }
+                    s1_idx += count2;
+                    s2_idx += count2;
+                    d1_idx += count2;
+                    d2_idx += count2 * 3;
+                }
+            } else {
+                for _ in 0..count1 {
+                    for _ in 0..count2 {
+                        let a = ch.spectra[subframe][s1_idx];
+                        let b = ch.spectra[subframe][s2_idx];
+                        s1_idx += 1;
+                        s2_idx += 1;
+
+                        let sin = sin_table[sin_idx];
+                        let cos = cos_table[cos_idx];
+                        sin_idx += 1;
+                        cos_idx += 1;
+
                         ch.temp[d1_idx] = a * sin - b * cos;
                         ch.temp[d2_idx] = a * cos + b * sin;
+                        d1_idx += 1;
+                        d2_idx -= 1;
                     }
-                    d1_idx += 1;
-                    d2_idx = d2_idx.saturating_sub(1);
+                    s1_idx += count2;
+                    s2_idx += count2;
+                    d1_idx += count2;
+                    d2_idx += count2 * 3;
                 }
-                s1_idx += count2;
-                s2_idx += count2;
-                d1_idx += count2;
-                d2_idx += count2 * 3;
             }
 
             use_temp_as_src = !use_temp_as_src;
