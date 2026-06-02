@@ -311,6 +311,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
 
         let mut pcm_buf =
             vec![0i16; self.info.samples_per_block * self.info.channel_count as usize];
+        let mut data_buf = vec![0u8; pcm_buf.len() * 2];
 
         loop {
             match self.read_packet() {
@@ -342,11 +343,14 @@ impl<R: Read + Seek> HcaDecoder<R> {
             }
 
             // Write samples as little-endian bytes
-            let mut data = vec![0u8; (end - start) * 2];
-            for (i, &sample) in pcm_buf[start..end].iter().enumerate() {
-                data[i * 2..i * 2 + 2].copy_from_slice(&sample.to_le_bytes());
+            let byte_len = (end - start) * 2;
+            for (chunk, &sample) in data_buf[..byte_len]
+                .chunks_exact_mut(2)
+                .zip(&pcm_buf[start..end])
+            {
+                chunk.copy_from_slice(&sample.to_le_bytes());
             }
-            w.write_all(&data)?;
+            w.write_all(&data_buf[..byte_len])?;
         }
 
         Ok(())
