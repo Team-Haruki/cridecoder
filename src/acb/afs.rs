@@ -1,6 +1,7 @@
 //! AFS2 archive parser
 
 use crate::reader::{align, Reader};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use thiserror::Error;
 
@@ -15,7 +16,7 @@ pub enum AfsError {
 }
 
 /// A file entry in an AFS2 archive
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct AfsFileEntry {
     pub cue_id: i32,
     pub offset: u32,
@@ -27,6 +28,7 @@ pub struct AfsArchive<R: Read + Seek> {
     pub alignment: u32,
     pub subkey: u16,
     pub files: Vec<AfsFileEntry>,
+    cue_index: HashMap<i32, usize>,
     reader: Reader<R>,
 }
 
@@ -94,25 +96,30 @@ impl<R: Read + Seek> AfsArchive<R> {
             });
         }
 
+        let cue_index = files
+            .iter()
+            .enumerate()
+            .map(|(idx, file)| (file.cue_id, idx))
+            .collect();
+
         Ok(Self {
             alignment,
             subkey,
             files,
+            cue_index,
             reader: buf,
         })
     }
 
     /// Get file data for a specific cue ID
     pub fn file_data_for_cue_id(&mut self, cue_id: i32) -> Result<Vec<u8>, AfsError> {
-        for f in &self.files {
-            if f.cue_id == cue_id {
-                return self.file_data(f.clone());
-            }
+        if let Some(&idx) = self.cue_index.get(&cue_id) {
+            return self.file_data_at_index(idx);
         }
 
         // Fallback to first file if cue IDs start at 0
         if !self.files.is_empty() && self.files[0].cue_id == 0 {
-            return self.file_data(self.files[0].clone());
+            return self.file_data_at_index(0);
         }
 
         Err(AfsError::CueNotFound(cue_id))
@@ -120,6 +127,15 @@ impl<R: Read + Seek> AfsArchive<R> {
 
     /// Get file data for an entry
     pub fn file_data(&mut self, entry: AfsFileEntry) -> Result<Vec<u8>, AfsError> {
+        self.file_data_by_entry(&entry)
+    }
+
+    fn file_data_at_index(&mut self, index: usize) -> Result<Vec<u8>, AfsError> {
+        let entry = self.files[index];
+        self.file_data_by_entry(&entry)
+    }
+
+    fn file_data_by_entry(&mut self, entry: &AfsFileEntry) -> Result<Vec<u8>, AfsError> {
         Ok(self
             .reader
             .read_bytes_at(entry.size as usize, entry.offset as u64)?)

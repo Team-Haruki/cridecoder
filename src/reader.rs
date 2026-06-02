@@ -1,7 +1,7 @@
 //! Binary reader utilities with endianness support
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 /// Reader wrapper with typed read methods
 pub struct Reader<R: Read + Seek> {
@@ -72,6 +72,20 @@ impl<R: Read + Seek> Reader<R> {
         let mut buf = vec![0u8; n];
         self.inner.read_exact(&mut buf)?;
         Ok(buf)
+    }
+
+    /// Copy exactly `n` bytes from the current position to a writer.
+    pub fn copy_to_writer<W: Write>(&mut self, n: u64, writer: &mut W) -> io::Result<u64> {
+        let mut limited = self.inner.by_ref().take(n);
+        let copied = io::copy(&mut limited, writer)?;
+        if copied == n {
+            Ok(copied)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to copy exact byte count",
+            ))
+        }
     }
 
     /// Read bytes at a specific offset, then restore position

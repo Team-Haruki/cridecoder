@@ -155,6 +155,40 @@ impl<R: Read + Seek> HcaDecoder<R> {
         Ok((&self.fbuf[start_idx..], num_samples))
     }
 
+    /// Decode a single frame into interleaved 16-bit PCM samples.
+    ///
+    /// Returns the number of sample frames written, not the number of i16
+    /// values. The caller-provided buffer must fit one full decoded HCA frame.
+    pub fn decode_frame_i16(&mut self, pcm: &mut [i16]) -> Result<usize, HcaDecoderError> {
+        let frame_len = self.info.samples_per_block * self.info.channel_count as usize;
+        if pcm.len() < frame_len {
+            return Err(HcaDecoderError::InvalidSampleRange);
+        }
+
+        self.read_packet()?;
+        self.handle.decode_block(&mut self.buf)?;
+        self.handle.read_samples_16(&mut pcm[..frame_len]);
+
+        let samples = self.info.samples_per_block as i32;
+        let mut discard = 0;
+
+        if self.current_delay > 0 {
+            if self.current_delay >= samples {
+                self.current_delay -= samples;
+                return Ok(0);
+            }
+            discard = self.current_delay;
+            self.current_delay = 0;
+        }
+
+        let start = discard as usize * self.info.channel_count as usize;
+        if start > 0 {
+            pcm.copy_within(start..frame_len, 0);
+        }
+
+        Ok((samples - discard) as usize)
+    }
+
     /// Decode the entire HCA file and return all samples
     pub fn decode_all(&mut self) -> Result<Vec<f32>, HcaDecoderError> {
         self.reset();
@@ -175,6 +209,35 @@ impl<R: Read + Seek> HcaDecoder<R> {
         }
 
         Ok(all_samples)
+    }
+
+    /// Decode the entire HCA file as interleaved 16-bit PCM chunks.
+    ///
+    /// The callback receives only valid samples after encoder-delay trimming.
+    /// This is useful when piping HCA directly into an audio encoder without
+    /// materializing an intermediate WAV file.
+    pub fn decode_to_pcm16_chunks<F>(&mut self, mut on_chunk: F) -> Result<(), HcaDecoderError>
+    where
+        F: FnMut(&[i16]) -> Result<(), HcaDecoderError>,
+    {
+        self.reset();
+
+        let channels = self.info.channel_count as usize;
+        let mut pcm_buf = vec![0i16; self.info.samples_per_block * channels];
+
+        loop {
+            match self.decode_frame_i16(&mut pcm_buf) {
+                Ok(0) => {}
+                Ok(sample_frames) => {
+                    let sample_count = sample_frames * channels;
+                    on_chunk(&pcm_buf[..sample_count])?;
+                }
+                Err(HcaDecoderError::Eof) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
     }
 
     /// Seek to a specific sample position
@@ -309,43 +372,16 @@ impl<R: Read + Seek> HcaDecoder<R> {
 
         w.write_all(&header)?;
 
-        let mut pcm_buf =
-            vec![0i16; self.info.samples_per_block * self.info.channel_count as usize];
-        let mut data_buf = vec![0u8; pcm_buf.len() * 2];
+        let frame_len = self.info.samples_per_block * self.info.channel_count as usize;
+        let mut data_buf = vec![0u8; frame_len * 2];
 
-        loop {
-            match self.read_packet() {
-                Ok(()) => {}
-                Err(HcaDecoderError::Eof) => break,
-                Err(e) => return Err(e),
-            }
-
-            self.handle.decode_block(&mut self.buf)?;
-            self.handle.read_samples_16(&mut pcm_buf);
-
-            let samples = self.info.samples_per_block as i32;
-            let mut discard = 0;
-
-            if self.current_delay > 0 {
-                if self.current_delay >= samples {
-                    self.current_delay -= samples;
-                    continue;
-                }
-                discard = self.current_delay;
-                self.current_delay = 0;
-            }
-
-            let start = discard as usize * self.info.channel_count as usize;
-            let end = samples as usize * self.info.channel_count as usize;
-
-            if start >= end || end > pcm_buf.len() {
+        self.decode_to_pcm16_chunks(|pcm| {
+            if pcm.len() > frame_len {
                 return Err(HcaDecoderError::InvalidSampleRange);
             }
-
-            write_pcm_i16_le(w, &pcm_buf[start..end], &mut data_buf)?;
-        }
-
-        Ok(())
+            write_pcm_i16_le(w, pcm, &mut data_buf)?;
+            Ok(())
+        })
     }
 }
 

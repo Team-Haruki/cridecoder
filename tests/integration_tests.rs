@@ -109,6 +109,43 @@ fn test_hca_decode_to_wav() {
     assert_eq!(&wav_buf[36..40], b"data", "Should have data chunk");
 }
 
+/// Test that direct PCM16 chunk decoding matches WAV payload bytes
+#[test]
+fn test_hca_decode_to_pcm16_chunks_matches_wav_data() {
+    let acb_path = Path::new("se_0126_01.acb");
+    if !acb_path.exists() {
+        eprintln!("Skipping test: se_0126_01.acb not found");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let tracks = cridecoder::extract_acb_from_file(acb_path, dir.path())
+        .unwrap()
+        .unwrap();
+    let hca_path = &tracks[0];
+
+    let mut wav_decoder =
+        cridecoder::HcaDecoder::from_file(hca_path).expect("Should open HCA file");
+    let mut wav_buf = Vec::new();
+    wav_decoder
+        .decode_to_wav(&mut wav_buf)
+        .expect("Should decode HCA to WAV");
+
+    let mut pcm_decoder =
+        cridecoder::HcaDecoder::from_file(hca_path).expect("Should open HCA file");
+    let mut pcm_bytes = Vec::new();
+    pcm_decoder
+        .decode_to_pcm16_chunks(|samples| {
+            for sample in samples {
+                pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            Ok(())
+        })
+        .expect("Should decode HCA to PCM chunks");
+
+    assert_eq!(&wav_buf[44..], pcm_bytes.as_slice());
+}
+
 /// Test that ALL HCA tracks extracted from ACB can be decoded to valid WAV
 #[test]
 fn test_all_hca_export_to_wav() {

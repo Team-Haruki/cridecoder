@@ -197,8 +197,6 @@ static COS_TABLES: [[f32; 64]; 7] = table_from_bits([
 
 /// Apply IMDCT transform to dequantized spectra
 pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
-    let size = HCA_SAMPLES_PER_SUBFRAME;
-    let half = HALF;
     // The IMDCT operates on fixed 128-sample buffers. The stage schedule below
     // only indexes within those arrays.
     let spectra = ch.spectra[subframe].as_mut_ptr();
@@ -221,16 +219,18 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
     dct_stage::<6, 1, 64, true>(spectra, temp);
 
     // Update output/IMDCT with overlapped window
-    {
-        for i in 0..half {
-            unsafe {
-                ch.wave[subframe][i] =
-                    IMDCT_WINDOW[i] * *spectra.add(i + half) + ch.imdct_previous[i];
-                ch.wave[subframe][i + half] = IMDCT_WINDOW[i + half] * *spectra.add(size - 1 - i)
-                    - ch.imdct_previous[i + half];
-                ch.imdct_previous[i] = IMDCT_WINDOW[size - 1 - i] * *spectra.add(half - i - 1);
-                ch.imdct_previous[i + half] = IMDCT_WINDOW[half - i - 1] * *spectra.add(i);
-            }
+    let wave = ch.wave[subframe].as_mut_ptr();
+    let previous = ch.imdct_previous.as_mut_ptr();
+    let window = IMDCT_WINDOW.as_ptr();
+    for i in 0..HALF {
+        unsafe {
+            *wave.add(i) = *window.add(i) * *spectra.add(i + HALF) + *previous.add(i);
+            *wave.add(i + HALF) = *window.add(i + HALF)
+                * *spectra.add(HCA_SAMPLES_PER_SUBFRAME - 1 - i)
+                - *previous.add(i + HALF);
+            *previous.add(i) =
+                *window.add(HCA_SAMPLES_PER_SUBFRAME - 1 - i) * *spectra.add(HALF - i - 1);
+            *previous.add(i + HALF) = *window.add(HALF - i - 1) * *spectra.add(i);
         }
     }
 }

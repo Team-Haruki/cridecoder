@@ -27,6 +27,10 @@ const COLUMN_TYPE_2BYTE2: u8 = 0x03;
 const COLUMN_TYPE_2BYTE: u8 = 0x02;
 const COLUMN_TYPE_1BYTE2: u8 = 0x01;
 const COLUMN_TYPE_1BYTE: u8 = 0x00;
+const MASK_LEN: usize = 0x20;
+
+type VideoMask = ([u8; MASK_LEN], [u8; MASK_LEN]);
+type AudioMask = [u8; MASK_LEN];
 
 /// USM extraction errors
 #[derive(Debug, Error)]
@@ -220,11 +224,11 @@ fn get_utf_table<R: Read + Seek>(reader: &mut Reader<R>) -> Result<UtfTable, Usm
 }
 
 /// Generate mask from key
-fn get_mask(key: u64) -> (Vec<Vec<u8>>, Vec<u8>) {
+fn get_mask(key: u64) -> (VideoMask, AudioMask) {
     let key1 = (key & 0xFFFFFFFF) as u32;
     let key2 = ((key >> 32) & 0xFFFFFFFF) as u32;
 
-    let mut t = [0u8; 0x20];
+    let mut t = [0u8; MASK_LEN];
     t[0x00] = (key1 & 0xFF) as u8;
     t[0x01] = ((key1 >> 8) & 0xFF) as u8;
     t[0x02] = ((key1 >> 16) & 0xFF) as u8;
@@ -259,9 +263,9 @@ fn get_mask(key: u64) -> (Vec<Vec<u8>>, Vec<u8>) {
     t[0x1F] = t[0x1D] ^ t[0x13];
 
     let t2 = b"URUC";
-    let mut vmask1 = vec![0u8; 0x20];
-    let mut vmask2 = vec![0u8; 0x20];
-    let mut amask = vec![0u8; 0x20];
+    let mut vmask1 = [0u8; MASK_LEN];
+    let mut vmask2 = [0u8; MASK_LEN];
+    let mut amask = [0u8; MASK_LEN];
 
     for (i, &ti) in t.iter().enumerate() {
         vmask1[i] = ti;
@@ -273,26 +277,26 @@ fn get_mask(key: u64) -> (Vec<Vec<u8>>, Vec<u8>) {
         }
     }
 
-    (vec![vmask1, vmask2], amask)
+    ((vmask1, vmask2), amask)
 }
 
 /// Mask video content
-fn mask_video(content: &[u8], vmask: &[Vec<u8>]) -> Vec<u8> {
+fn mask_video(content: &[u8], vmask: &VideoMask) -> Vec<u8> {
     let mut result = content.to_vec();
     let size = result.len().saturating_sub(0x40);
     let base = 0x40;
 
     if size >= 0x200 {
-        let mut mask = vmask[1].clone();
+        let mut mask = vmask.1;
 
         // Second pass
         for i in 0x100..size {
             result[base + i] ^= mask[i & 0x1F];
-            mask[i & 0x1F] = result[base + i] ^ vmask[1][i & 0x1F];
+            mask[i & 0x1F] = result[base + i] ^ vmask.1[i & 0x1F];
         }
 
         // First pass
-        mask.copy_from_slice(&vmask[0]);
+        mask.copy_from_slice(&vmask.0);
         for i in 0..0x100 {
             mask[i & 0x1F] ^= result[0x100 + base + i];
             result[base + i] ^= mask[i & 0x1F];
@@ -303,7 +307,7 @@ fn mask_video(content: &[u8], vmask: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Mask audio content
-fn mask_audio(content: &[u8], amask: &[u8]) -> Vec<u8> {
+fn mask_audio(content: &[u8], amask: &AudioMask) -> Vec<u8> {
     let mut result = content.to_vec();
     let size = result.len().saturating_sub(0x140);
     let base = 0x140;
@@ -515,8 +519,8 @@ fn extract_usm_chunks<R: Read + Seek>(
     reader: &mut Reader<R>,
     video_file: &mut File,
     mut audio_file: Option<&mut File>,
-    vmask: Option<&Vec<Vec<u8>>>,
-    amask: Option<&Vec<u8>>,
+    vmask: Option<&VideoMask>,
+    amask: Option<&AudioMask>,
 ) -> Result<(), UsmError> {
     while let Ok(next_sig) = reader.read_bytes(4) {
         let block_size = reader.read_u32()?;
@@ -565,34 +569,34 @@ fn process_chunk<R: Read + Seek>(
     data_type: u8,
     video_file: &mut File,
     audio_file: &mut Option<&mut File>,
-    vmask: Option<&Vec<Vec<u8>>>,
-    amask: Option<&Vec<u8>>,
+    vmask: Option<&VideoMask>,
+    amask: Option<&AudioMask>,
 ) -> Result<(), UsmError> {
     if sig == b"@SFV" {
-        let content = reader.read_bytes(read_data_len)?;
-        let content = if data_type == 0 {
+        if data_type == 0 {
             if let Some(vmask) = vmask {
-                mask_video(&content, vmask)
+                let content = reader.read_bytes(read_data_len)?;
+                let content = mask_video(&content, vmask);
+                video_file.write_all(&content)?;
             } else {
-                content
+                reader.copy_to_writer(read_data_len as u64, video_file)?;
             }
         } else {
-            content
-        };
-        video_file.write_all(&content)?;
+            reader.copy_to_writer(read_data_len as u64, video_file)?;
+        }
     } else if sig == b"@SFA" {
         if let Some(audio_file) = audio_file {
-            let content = reader.read_bytes(read_data_len)?;
-            let content = if data_type == 0 {
+            if data_type == 0 {
                 if let Some(amask) = amask {
-                    mask_audio(&content, amask)
+                    let content = reader.read_bytes(read_data_len)?;
+                    let content = mask_audio(&content, amask);
+                    audio_file.write_all(&content)?;
                 } else {
-                    content
+                    reader.copy_to_writer(read_data_len as u64, audio_file)?;
                 }
             } else {
-                content
-            };
-            audio_file.write_all(&content)?;
+                reader.copy_to_writer(read_data_len as u64, audio_file)?;
+            }
         }
     }
 

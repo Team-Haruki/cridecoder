@@ -1134,40 +1134,54 @@ impl ClHca {
     fn dequantize_coefficients(&mut self, ch: usize, br: &mut BitReader, subframe: usize) {
         let channel = &mut self.channel[ch];
         let cc_count = channel.coded_count;
+        let spectra = &mut channel.spectra[subframe];
 
-        for i in 0..cc_count {
+        for (i, sample) in spectra.iter_mut().enumerate().take(cc_count) {
             let resolution = channel.resolution[i];
-            let bits = MAX_BIT_TABLE[resolution as usize];
-            let code = br.read(bits as usize);
-
-            let qc: f32 = if resolution > 7 {
-                // Sign-magnitude form: sign is bit 0, magnitude is bits 1+
-                let sign = if (code & 1) != 0 { -1i32 } else { 1i32 };
-                let signed_code = sign * (code >> 1) as i32;
-                if signed_code == 0 {
-                    br.set_position(br.position() - 1);
+            let qc = match resolution {
+                0 => 0.0,
+                1..=7 => {
+                    let bits = MAX_BIT_TABLE[resolution as usize];
+                    let code = br.read(bits as usize);
+                    let index = ((resolution as usize) << 4) + code as usize;
+                    let skip = READ_BIT_TABLE[index] as i32 - bits as i32;
+                    if skip > 0 {
+                        br.skip(skip as usize);
+                    } else if skip < 0 {
+                        br.set_position(br.position().saturating_sub((-skip) as usize));
+                    }
+                    READ_VAL_TABLE[index]
                 }
-                signed_code as f32
-            } else {
-                // Prefix codebooks
-                let index = ((resolution as usize) << 4) + code as usize;
-                let skip = READ_BIT_TABLE[index] as i32 - bits as i32;
-                if skip > 0 {
-                    br.skip(skip as usize);
-                } else if skip < 0 {
-                    br.set_position(br.position().saturating_sub((-skip) as usize));
+                _ => {
+                    let bits = MAX_BIT_TABLE[resolution as usize];
+                    let code = br.read(bits as usize);
+                    // Sign-magnitude form: sign is bit 0, magnitude is bits 1+
+                    let sign = if (code & 1) != 0 { -1i32 } else { 1i32 };
+                    let signed_code = sign * (code >> 1) as i32;
+                    if signed_code == 0 {
+                        br.set_position(br.position() - 1);
+                    }
+                    signed_code as f32
                 }
-                READ_VAL_TABLE[index]
             };
 
-            channel.spectra[subframe][i] = channel.gain[i] * qc;
+            *sample = channel.gain[i] * qc;
         }
 
         // Clean rest of spectra
-        channel.spectra[subframe][cc_count..HCA_SAMPLES_PER_SUBFRAME].fill(0.0);
+        spectra[cc_count..HCA_SAMPLES_PER_SUBFRAME].fill(0.0);
     }
 
     fn decode_block_transform(&mut self) {
+        if self.min_resolution > 0 && self.bands_per_hfr_group == 0 && self.stereo_band_count == 0 {
+            for subframe in 0..HCA_SUBFRAMES {
+                for ch in 0..self.channels as usize {
+                    imdct_transform(&mut self.channel[ch], subframe);
+                }
+            }
+            return;
+        }
+
         for subframe in 0..HCA_SUBFRAMES {
             // Restore missing bands
             for ch in 0..self.channels as usize {
