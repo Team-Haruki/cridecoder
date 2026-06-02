@@ -342,19 +342,41 @@ impl<R: Read + Seek> HcaDecoder<R> {
                 return Err(HcaDecoderError::InvalidSampleRange);
             }
 
-            // Write samples as little-endian bytes
-            let byte_len = (end - start) * 2;
-            for (chunk, &sample) in data_buf[..byte_len]
-                .chunks_exact_mut(2)
-                .zip(&pcm_buf[start..end])
-            {
-                chunk.copy_from_slice(&sample.to_le_bytes());
-            }
-            w.write_all(&data_buf[..byte_len])?;
+            write_pcm_i16_le(w, &pcm_buf[start..end], &mut data_buf)?;
         }
 
         Ok(())
     }
+}
+
+#[cfg(target_endian = "little")]
+fn write_pcm_i16_le<W: Write>(
+    writer: &mut W,
+    samples: &[i16],
+    _scratch: &mut [u8],
+) -> io::Result<()> {
+    let bytes = unsafe {
+        // SAFETY: i16 is a plain integer type, and on little-endian targets its
+        // in-memory representation is exactly the little-endian PCM byte order.
+        std::slice::from_raw_parts(
+            samples.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(samples),
+        )
+    };
+    writer.write_all(bytes)
+}
+
+#[cfg(not(target_endian = "little"))]
+fn write_pcm_i16_le<W: Write>(
+    writer: &mut W,
+    samples: &[i16],
+    scratch: &mut [u8],
+) -> io::Result<()> {
+    let byte_len = samples.len() * 2;
+    for (chunk, &sample) in scratch[..byte_len].chunks_exact_mut(2).zip(samples) {
+        chunk.copy_from_slice(&sample.to_le_bytes());
+    }
+    writer.write_all(&scratch[..byte_len])
 }
 
 fn scale_frame_score(score: i32) -> i32 {

@@ -726,16 +726,36 @@ impl ClHca {
 
     /// Read decoded samples as 16-bit PCM
     pub fn read_samples_16(&self, samples: &mut [i16]) {
-        const SCALE_F: f32 = 32768.0;
+        let channels = self.channels as usize;
 
-        let mut idx = 0;
-        for i in 0..HCA_SUBFRAMES {
-            for j in 0..HCA_SAMPLES_PER_SUBFRAME {
-                for k in 0..self.channels as usize {
-                    let f = self.channel[k].wave[i][j];
-                    let s = (f * SCALE_F) as i32;
-                    samples[idx] = s.clamp(-32768, 32767) as i16;
-                    idx += 1;
+        match channels {
+            1 => {
+                for i in 0..HCA_SUBFRAMES {
+                    let base = i * HCA_SAMPLES_PER_SUBFRAME;
+                    for j in 0..HCA_SAMPLES_PER_SUBFRAME {
+                        samples[base + j] = pcm_f32_to_i16(self.channel[0].wave[i][j]);
+                    }
+                }
+            }
+            2 => {
+                for i in 0..HCA_SUBFRAMES {
+                    let base = i * HCA_SAMPLES_PER_SUBFRAME * 2;
+                    for j in 0..HCA_SAMPLES_PER_SUBFRAME {
+                        let idx = base + j * 2;
+                        samples[idx] = pcm_f32_to_i16(self.channel[0].wave[i][j]);
+                        samples[idx + 1] = pcm_f32_to_i16(self.channel[1].wave[i][j]);
+                    }
+                }
+            }
+            _ => {
+                let mut idx = 0;
+                for i in 0..HCA_SUBFRAMES {
+                    for j in 0..HCA_SAMPLES_PER_SUBFRAME {
+                        for k in 0..channels {
+                            samples[idx] = pcm_f32_to_i16(self.channel[k].wave[i][j]);
+                            idx += 1;
+                        }
+                    }
                 }
             }
         }
@@ -1284,6 +1304,13 @@ impl ClHca {
             self.channel[ch + 1].spectra[subframe][band] = (l - r) * RATIO;
         }
     }
+}
+
+#[inline]
+fn pcm_f32_to_i16(sample: f32) -> i16 {
+    const SCALE_F: f32 = 32768.0;
+    let scaled = (sample * SCALE_F) as i32;
+    scaled.clamp(-32768, 32767) as i16
 }
 
 #[cfg(test)]
