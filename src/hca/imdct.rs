@@ -1,6 +1,6 @@
 //! IMDCT (Inverse Modified Discrete Cosine Transform) for HCA decoding
 
-use super::decoder::{StChannel, HCA_MDCT_BITS, HCA_SAMPLES_PER_SUBFRAME};
+use super::decoder::{StChannel, HCA_SAMPLES_PER_SUBFRAME};
 use super::tables::IMDCT_WINDOW;
 use std::sync::LazyLock;
 
@@ -206,149 +206,26 @@ static COS_TABLES: LazyLock<[[f32; 64]; 7]> = LazyLock::new(|| {
 pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
     let size = HCA_SAMPLES_PER_SUBFRAME;
     let half = HALF;
-    let mdct_bits = HCA_MDCT_BITS;
-    // The IMDCT operates on fixed 128-sample buffers. The loop schedule below
-    // is bounded by HCA_MDCT_BITS and only indexes within those arrays.
+    // The IMDCT operates on fixed 128-sample buffers. The stage schedule below
+    // only indexes within those arrays.
     let spectra = ch.spectra[subframe].as_mut_ptr();
     let temp = ch.temp.as_mut_ptr();
 
-    // Pre-pre-rotation (butterfly)
-    {
-        let mut count1 = 1usize;
-        let mut count2 = half;
+    butterfly_stage::<1, 64, false>(spectra, temp);
+    butterfly_stage::<2, 32, true>(spectra, temp);
+    butterfly_stage::<4, 16, false>(spectra, temp);
+    butterfly_stage::<8, 8, true>(spectra, temp);
+    butterfly_stage::<16, 4, false>(spectra, temp);
+    butterfly_stage::<32, 2, true>(spectra, temp);
+    butterfly_stage::<64, 1, false>(spectra, temp);
 
-        // We alternate between spectra and temp buffers
-        let mut use_temp_as_src = false;
-
-        for _ in 0..mdct_bits {
-            let mut d1_idx = 0usize;
-            let mut d2_idx = count2;
-            let mut t1_idx = 0usize;
-
-            if use_temp_as_src {
-                for _ in 0..count1 {
-                    for _ in 0..count2 {
-                        let a = unsafe { *temp.add(t1_idx) };
-                        let b = unsafe { *temp.add(t1_idx + 1) };
-                        t1_idx += 2;
-
-                        unsafe {
-                            *spectra.add(d1_idx) = a + b;
-                            *spectra.add(d2_idx) = a - b;
-                        }
-                        d1_idx += 1;
-                        d2_idx += 1;
-                    }
-                    d1_idx += count2;
-                    d2_idx += count2;
-                }
-            } else {
-                for _ in 0..count1 {
-                    for _ in 0..count2 {
-                        let a = unsafe { *spectra.add(t1_idx) };
-                        let b = unsafe { *spectra.add(t1_idx + 1) };
-                        t1_idx += 2;
-
-                        unsafe {
-                            *temp.add(d1_idx) = a + b;
-                            *temp.add(d2_idx) = a - b;
-                        }
-                        d1_idx += 1;
-                        d2_idx += 1;
-                    }
-                    d1_idx += count2;
-                    d2_idx += count2;
-                }
-            }
-
-            use_temp_as_src = !use_temp_as_src;
-            count1 <<= 1;
-            count2 >>= 1;
-        }
-
-        // After 7 iterations, result is in temp (since we started with spectra)
-    }
-
-    // DCT-IV with rotation
-    {
-        let mut count1 = half;
-        let mut count2 = 1usize;
-        let sin_tables = &*SIN_TABLES;
-        let cos_tables = &*COS_TABLES;
-
-        // After pre-rotation, data is in temp, output goes to spectra
-        let mut use_temp_as_src = true;
-
-        for i in 0..mdct_bits {
-            let sin_table = &sin_tables[i];
-            let cos_table = &cos_tables[i];
-            let mut sin_idx = 0;
-            let mut cos_idx = 0;
-
-            let mut d1_idx = 0usize;
-            let mut d2_idx = count2 * 2 - 1;
-            let mut s1_idx = 0usize;
-            let mut s2_idx = count2;
-
-            if use_temp_as_src {
-                for _ in 0..count1 {
-                    for _ in 0..count2 {
-                        let a = unsafe { *temp.add(s1_idx) };
-                        let b = unsafe { *temp.add(s2_idx) };
-                        s1_idx += 1;
-                        s2_idx += 1;
-
-                        let sin = sin_table[sin_idx];
-                        let cos = cos_table[cos_idx];
-                        sin_idx += 1;
-                        cos_idx += 1;
-
-                        unsafe {
-                            *spectra.add(d1_idx) = a * sin - b * cos;
-                            *spectra.add(d2_idx) = a * cos + b * sin;
-                        }
-                        d1_idx += 1;
-                        d2_idx -= 1;
-                    }
-                    s1_idx += count2;
-                    s2_idx += count2;
-                    d1_idx += count2;
-                    d2_idx += count2 * 3;
-                }
-            } else {
-                for _ in 0..count1 {
-                    for _ in 0..count2 {
-                        let a = unsafe { *spectra.add(s1_idx) };
-                        let b = unsafe { *spectra.add(s2_idx) };
-                        s1_idx += 1;
-                        s2_idx += 1;
-
-                        let sin = sin_table[sin_idx];
-                        let cos = cos_table[cos_idx];
-                        sin_idx += 1;
-                        cos_idx += 1;
-
-                        unsafe {
-                            *temp.add(d1_idx) = a * sin - b * cos;
-                            *temp.add(d2_idx) = a * cos + b * sin;
-                        }
-                        d1_idx += 1;
-                        d2_idx -= 1;
-                    }
-                    s1_idx += count2;
-                    s2_idx += count2;
-                    d1_idx += count2;
-                    d2_idx += count2 * 3;
-                }
-            }
-
-            use_temp_as_src = !use_temp_as_src;
-            count1 >>= 1;
-            count2 <<= 1;
-        }
-
-        // After 7 iterations, result is in spectra
-    }
+    dct_stage::<0, 64, 1, true>(spectra, temp);
+    dct_stage::<1, 32, 2, false>(spectra, temp);
+    dct_stage::<2, 16, 4, true>(spectra, temp);
+    dct_stage::<3, 8, 8, false>(spectra, temp);
+    dct_stage::<4, 4, 16, true>(spectra, temp);
+    dct_stage::<5, 2, 32, false>(spectra, temp);
+    dct_stage::<6, 1, 64, true>(spectra, temp);
 
     // Update output/IMDCT with overlapped window
     {
@@ -361,6 +238,120 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
                 ch.imdct_previous[i] = IMDCT_WINDOW[size - 1 - i] * *spectra.add(half - i - 1);
                 ch.imdct_previous[i + half] = IMDCT_WINDOW[half - i - 1] * *spectra.add(i);
             }
+        }
+    }
+}
+
+#[inline(always)]
+fn butterfly_stage<const COUNT1: usize, const COUNT2: usize, const TEMP_SRC: bool>(
+    spectra: *mut f32,
+    temp: *mut f32,
+) {
+    let mut d1_idx = 0usize;
+    let mut d2_idx = COUNT2;
+    let mut t1_idx = 0usize;
+
+    if TEMP_SRC {
+        for _ in 0..COUNT1 {
+            for _ in 0..COUNT2 {
+                unsafe {
+                    let a = *temp.add(t1_idx);
+                    let b = *temp.add(t1_idx + 1);
+                    t1_idx += 2;
+
+                    *spectra.add(d1_idx) = a + b;
+                    *spectra.add(d2_idx) = a - b;
+                }
+                d1_idx += 1;
+                d2_idx += 1;
+            }
+            d1_idx += COUNT2;
+            d2_idx += COUNT2;
+        }
+    } else {
+        for _ in 0..COUNT1 {
+            for _ in 0..COUNT2 {
+                unsafe {
+                    let a = *spectra.add(t1_idx);
+                    let b = *spectra.add(t1_idx + 1);
+                    t1_idx += 2;
+
+                    *temp.add(d1_idx) = a + b;
+                    *temp.add(d2_idx) = a - b;
+                }
+                d1_idx += 1;
+                d2_idx += 1;
+            }
+            d1_idx += COUNT2;
+            d2_idx += COUNT2;
+        }
+    }
+}
+
+#[inline(always)]
+fn dct_stage<const TABLE: usize, const COUNT1: usize, const COUNT2: usize, const TEMP_SRC: bool>(
+    spectra: *mut f32,
+    temp: *mut f32,
+) {
+    let sin_table = &SIN_TABLES[TABLE];
+    let cos_table = &COS_TABLES[TABLE];
+    let mut sin_idx = 0;
+    let mut cos_idx = 0;
+
+    let mut d1_idx = 0usize;
+    let mut d2_idx = COUNT2 * 2 - 1;
+    let mut s1_idx = 0usize;
+    let mut s2_idx = COUNT2;
+
+    if TEMP_SRC {
+        for _ in 0..COUNT1 {
+            for _ in 0..COUNT2 {
+                unsafe {
+                    let a = *temp.add(s1_idx);
+                    let b = *temp.add(s2_idx);
+                    s1_idx += 1;
+                    s2_idx += 1;
+
+                    let sin = sin_table[sin_idx];
+                    let cos = cos_table[cos_idx];
+                    sin_idx += 1;
+                    cos_idx += 1;
+
+                    *spectra.add(d1_idx) = a * sin - b * cos;
+                    *spectra.add(d2_idx) = a * cos + b * sin;
+                }
+                d1_idx += 1;
+                d2_idx -= 1;
+            }
+            s1_idx += COUNT2;
+            s2_idx += COUNT2;
+            d1_idx += COUNT2;
+            d2_idx += COUNT2 * 3;
+        }
+    } else {
+        for _ in 0..COUNT1 {
+            for _ in 0..COUNT2 {
+                unsafe {
+                    let a = *spectra.add(s1_idx);
+                    let b = *spectra.add(s2_idx);
+                    s1_idx += 1;
+                    s2_idx += 1;
+
+                    let sin = sin_table[sin_idx];
+                    let cos = cos_table[cos_idx];
+                    sin_idx += 1;
+                    cos_idx += 1;
+
+                    *temp.add(d1_idx) = a * sin - b * cos;
+                    *temp.add(d2_idx) = a * cos + b * sin;
+                }
+                d1_idx += 1;
+                d2_idx -= 1;
+            }
+            s1_idx += COUNT2;
+            s2_idx += COUNT2;
+            d1_idx += COUNT2;
+            d2_idx += COUNT2 * 3;
         }
     }
 }

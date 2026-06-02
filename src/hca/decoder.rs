@@ -24,7 +24,6 @@ pub const HCA_MASK: u32 = 0x7F7F7F7F;
 pub const HCA_SUBFRAMES: usize = 8;
 pub const HCA_SAMPLES_PER_SUBFRAME: usize = 128;
 pub const HCA_SAMPLES_PER_FRAME: usize = HCA_SUBFRAMES * HCA_SAMPLES_PER_SUBFRAME;
-pub const HCA_MDCT_BITS: usize = 7;
 pub const HCA_MIN_CHANNELS: u32 = 1;
 pub const HCA_MAX_CHANNELS: usize = 16;
 pub const HCA_MIN_SAMPLE_RATE: u32 = 1;
