@@ -919,8 +919,10 @@ impl ClHca {
             return Err(HcaError::ChecksumFailed);
         }
 
-        // Decrypt
-        cipher_decrypt(&self.cipher_table, &mut data[..self.frame_size as usize]);
+        // Decrypt only when the file uses a non-identity cipher.
+        if self.ciph_type != 0 {
+            cipher_decrypt(&self.cipher_table, &mut data[..self.frame_size as usize]);
+        }
 
         // Re-initialize bitreader after decryption
         let mut br = BitReader::with_offset(data, 2); // Skip sync word
