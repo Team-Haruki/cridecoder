@@ -207,6 +207,10 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
     let size = HCA_SAMPLES_PER_SUBFRAME;
     let half = HALF;
     let mdct_bits = HCA_MDCT_BITS;
+    // The IMDCT operates on fixed 128-sample buffers. The loop schedule below
+    // is bounded by HCA_MDCT_BITS and only indexes within those arrays.
+    let spectra = ch.spectra[subframe].as_mut_ptr();
+    let temp = ch.temp.as_mut_ptr();
 
     // Pre-pre-rotation (butterfly)
     {
@@ -224,12 +228,14 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
             if use_temp_as_src {
                 for _ in 0..count1 {
                     for _ in 0..count2 {
-                        let a = ch.temp[t1_idx];
-                        let b = ch.temp[t1_idx + 1];
+                        let a = unsafe { *temp.add(t1_idx) };
+                        let b = unsafe { *temp.add(t1_idx + 1) };
                         t1_idx += 2;
 
-                        ch.spectra[subframe][d1_idx] = a + b;
-                        ch.spectra[subframe][d2_idx] = a - b;
+                        unsafe {
+                            *spectra.add(d1_idx) = a + b;
+                            *spectra.add(d2_idx) = a - b;
+                        }
                         d1_idx += 1;
                         d2_idx += 1;
                     }
@@ -239,12 +245,14 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
             } else {
                 for _ in 0..count1 {
                     for _ in 0..count2 {
-                        let a = ch.spectra[subframe][t1_idx];
-                        let b = ch.spectra[subframe][t1_idx + 1];
+                        let a = unsafe { *spectra.add(t1_idx) };
+                        let b = unsafe { *spectra.add(t1_idx + 1) };
                         t1_idx += 2;
 
-                        ch.temp[d1_idx] = a + b;
-                        ch.temp[d2_idx] = a - b;
+                        unsafe {
+                            *temp.add(d1_idx) = a + b;
+                            *temp.add(d2_idx) = a - b;
+                        }
                         d1_idx += 1;
                         d2_idx += 1;
                     }
@@ -285,8 +293,8 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
             if use_temp_as_src {
                 for _ in 0..count1 {
                     for _ in 0..count2 {
-                        let a = ch.temp[s1_idx];
-                        let b = ch.temp[s2_idx];
+                        let a = unsafe { *temp.add(s1_idx) };
+                        let b = unsafe { *temp.add(s2_idx) };
                         s1_idx += 1;
                         s2_idx += 1;
 
@@ -295,8 +303,10 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
                         sin_idx += 1;
                         cos_idx += 1;
 
-                        ch.spectra[subframe][d1_idx] = a * sin - b * cos;
-                        ch.spectra[subframe][d2_idx] = a * cos + b * sin;
+                        unsafe {
+                            *spectra.add(d1_idx) = a * sin - b * cos;
+                            *spectra.add(d2_idx) = a * cos + b * sin;
+                        }
                         d1_idx += 1;
                         d2_idx -= 1;
                     }
@@ -308,8 +318,8 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
             } else {
                 for _ in 0..count1 {
                     for _ in 0..count2 {
-                        let a = ch.spectra[subframe][s1_idx];
-                        let b = ch.spectra[subframe][s2_idx];
+                        let a = unsafe { *spectra.add(s1_idx) };
+                        let b = unsafe { *spectra.add(s2_idx) };
                         s1_idx += 1;
                         s2_idx += 1;
 
@@ -318,8 +328,10 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
                         sin_idx += 1;
                         cos_idx += 1;
 
-                        ch.temp[d1_idx] = a * sin - b * cos;
-                        ch.temp[d2_idx] = a * cos + b * sin;
+                        unsafe {
+                            *temp.add(d1_idx) = a * sin - b * cos;
+                            *temp.add(d2_idx) = a * cos + b * sin;
+                        }
                         d1_idx += 1;
                         d2_idx -= 1;
                     }
@@ -340,14 +352,15 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
 
     // Update output/IMDCT with overlapped window
     {
-        let dct = &ch.spectra[subframe];
-
         for i in 0..half {
-            ch.wave[subframe][i] = IMDCT_WINDOW[i] * dct[i + half] + ch.imdct_previous[i];
-            ch.wave[subframe][i + half] =
-                IMDCT_WINDOW[i + half] * dct[size - 1 - i] - ch.imdct_previous[i + half];
-            ch.imdct_previous[i] = IMDCT_WINDOW[size - 1 - i] * dct[half - i - 1];
-            ch.imdct_previous[i + half] = IMDCT_WINDOW[half - i - 1] * dct[i];
+            unsafe {
+                ch.wave[subframe][i] =
+                    IMDCT_WINDOW[i] * *spectra.add(i + half) + ch.imdct_previous[i];
+                ch.wave[subframe][i + half] = IMDCT_WINDOW[i + half] * *spectra.add(size - 1 - i)
+                    - ch.imdct_previous[i + half];
+                ch.imdct_previous[i] = IMDCT_WINDOW[size - 1 - i] * *spectra.add(half - i - 1);
+                ch.imdct_previous[i + half] = IMDCT_WINDOW[half - i - 1] * *spectra.add(i);
+            }
         }
     }
 }
