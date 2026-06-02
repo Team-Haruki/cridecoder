@@ -9,6 +9,13 @@ use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use thiserror::Error;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedAcbTrack {
+    pub name: String,
+    pub extension: String,
+    pub data: Vec<u8>,
+}
+
 #[derive(Error, Debug)]
 pub enum ExtractError {
     #[error("IO error: {0}")]
@@ -42,6 +49,38 @@ pub fn extract_acb<R: Read + Seek>(
         &mut embedded_awb,
         &mut external_awbs,
     )
+}
+
+/// Extract all audio tracks from an ACB reader into memory.
+pub fn extract_acb_to_memory<R: Read + Seek>(
+    acb_file: R,
+    acb_file_path: Option<&Path>,
+) -> Result<Vec<ExtractedAcbTrack>, ExtractError> {
+    let utf = UtfTable::new(acb_file)?;
+    let track_list = TrackList::new(&utf)?;
+    let mut embedded_awb = load_embedded_awb(&utf.rows[0]);
+    let mut external_awbs = load_external_awbs(&utf.rows[0], acb_file_path);
+
+    let mut outputs = Vec::new();
+    for track in &track_list.tracks {
+        let data = match get_track_data(track, &mut embedded_awb, &mut external_awbs)? {
+            Some(data) => data,
+            None => continue,
+        };
+        let extension = wave_type_extension(track.enc_type);
+        let extension = if extension.is_empty() {
+            track.enc_type.to_string()
+        } else {
+            extension.trim_start_matches('.').to_string()
+        };
+        outputs.push(ExtractedAcbTrack {
+            name: track.name.clone(),
+            extension,
+            data,
+        });
+    }
+
+    Ok(outputs)
 }
 
 fn load_embedded_awb(

@@ -70,6 +70,13 @@ pub type UtfRow = std::collections::HashMap<String, UtfValue>;
 /// A UTF table
 pub type UtfTable = Vec<UtfRow>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedUsmStream {
+    pub name: String,
+    pub extension: String,
+    pub data: Vec<u8>,
+}
+
 /// Read column data from a UTF table
 fn read_column_data<R: Read + Seek>(
     reader: &mut Reader<R>,
@@ -356,6 +363,32 @@ pub fn extract_usm<R: Read + Seek>(
     Ok(output_files)
 }
 
+/// Extract USM video/audio streams from a reader into memory.
+pub fn extract_usm_to_memory<R: Read + Seek>(
+    usm: R,
+    fallback_name: &[u8],
+    key: Option<u64>,
+    export_audio: bool,
+) -> Result<Vec<ExtractedUsmStream>, UsmError> {
+    let mut reader = Reader::new(usm);
+    let (vmask, amask) = key.map(get_mask).unzip();
+    let (filename, has_audio) = parse_usm_header(&mut reader, fallback_name)?;
+    let decoded_filename = decode_shift_jis(&filename);
+    let base_name = Path::new(&decoded_filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&decoded_filename)
+        .to_string();
+
+    extract_usm_chunks_to_memory(
+        &mut reader,
+        base_name,
+        has_audio && export_audio,
+        vmask.as_ref(),
+        amask.as_ref(),
+    )
+}
+
 /// Parse USM header
 fn parse_usm_header<R: Read + Seek>(
     reader: &mut Reader<R>,
@@ -558,6 +591,86 @@ fn extract_usm_chunks<R: Read + Seek>(
     }
 
     Ok(())
+}
+
+fn extract_usm_chunks_to_memory<R: Read + Seek>(
+    reader: &mut Reader<R>,
+    base_name: String,
+    export_audio: bool,
+    vmask: Option<&VideoMask>,
+    amask: Option<&AudioMask>,
+) -> Result<Vec<ExtractedUsmStream>, UsmError> {
+    let mut video = Vec::new();
+    let mut audio = if export_audio { Some(Vec::new()) } else { None };
+
+    while let Ok(next_sig) = reader.read_bytes(4) {
+        let block_size = reader.read_u32()?;
+        let current_pos = reader.stream_position()?;
+        let next_offset = current_pos + block_size as u64;
+
+        let chunk_header_size = reader.read_u16()?;
+        let chunk_footer_size = reader.read_u16()?;
+        let _ = reader.read_bytes(3)?;
+        let data_type_byte = reader.read_i8()?;
+        let data_type = (data_type_byte & 0b11) as u8;
+        reader.seek(SeekFrom::Current(16))?;
+
+        let contents_end = reader.read_bytes(13)?;
+        if &contents_end == b"#CONTENTS END" {
+            break;
+        }
+
+        reader.seek(SeekFrom::Current(-13))?;
+        let read_data_len =
+            block_size as usize - chunk_header_size as usize - chunk_footer_size as usize;
+
+        if next_sig == b"@SFV" {
+            let content = read_usm_chunk_to_vec(reader, read_data_len, data_type, vmask, None)?;
+            video.extend_from_slice(&content);
+        } else if next_sig == b"@SFA" {
+            if let Some(audio) = audio.as_mut() {
+                let content = read_usm_chunk_to_vec(reader, read_data_len, data_type, None, amask)?;
+                audio.extend_from_slice(&content);
+            }
+        }
+
+        reader.seek(SeekFrom::Start(next_offset))?;
+    }
+
+    let mut streams = vec![ExtractedUsmStream {
+        name: base_name.clone(),
+        extension: "m2v".to_string(),
+        data: video,
+    }];
+    if let Some(audio) = audio {
+        streams.push(ExtractedUsmStream {
+            name: base_name,
+            extension: "adx".to_string(),
+            data: audio,
+        });
+    }
+
+    Ok(streams)
+}
+
+fn read_usm_chunk_to_vec<R: Read + Seek>(
+    reader: &mut Reader<R>,
+    read_data_len: usize,
+    data_type: u8,
+    vmask: Option<&VideoMask>,
+    amask: Option<&AudioMask>,
+) -> Result<Vec<u8>, UsmError> {
+    let content = reader.read_bytes(read_data_len)?;
+    if data_type != 0 {
+        return Ok(content);
+    }
+    if let Some(vmask) = vmask {
+        return Ok(mask_video(&content, vmask));
+    }
+    if let Some(amask) = amask {
+        return Ok(mask_audio(&content, amask));
+    }
+    Ok(content)
 }
 
 /// Process a chunk

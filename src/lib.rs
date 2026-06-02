@@ -14,7 +14,7 @@ pub mod usm;
 mod python;
 
 // ACB/AWB exports
-pub use acb::{extract_acb, extract_acb_from_file};
+pub use acb::{extract_acb, extract_acb_from_file, extract_acb_to_memory, ExtractedAcbTrack};
 pub use acb::{AcbBuilder, AfsArchiveBuilder, BuilderError, TrackInput, UtfTableBuilder};
 
 // HCA exports
@@ -22,7 +22,9 @@ pub use hca::{encode_wav_to_hca, HcaEncoder, HcaEncoderConfig, HcaEncoderError};
 pub use hca::{HcaDecoder, HcaDecoderError, HcaInfo};
 
 // USM exports
-pub use usm::{extract_usm, extract_usm_file, Metadata, UsmError};
+pub use usm::{
+    extract_usm, extract_usm_file, extract_usm_to_memory, ExtractedUsmStream, Metadata, UsmError,
+};
 pub use usm::{UsmBuilder, UsmBuilderError};
 
 #[cfg(feature = "python")]
