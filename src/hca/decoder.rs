@@ -1135,37 +1135,35 @@ impl ClHca {
         let channel = &mut self.channel[ch];
         let cc_count = channel.coded_count;
         let spectra = &mut channel.spectra[subframe];
+        let gain = &channel.gain;
+        let resolution = &channel.resolution;
 
-        for (i, sample) in spectra.iter_mut().enumerate().take(cc_count) {
-            let resolution = channel.resolution[i];
-            let qc = match resolution {
-                0 => 0.0,
-                1..=7 => {
-                    let bits = MAX_BIT_TABLE[resolution as usize];
-                    let code = br.read(bits as usize);
-                    let index = ((resolution as usize) << 4) + code as usize;
-                    let skip = READ_BIT_TABLE[index] as i32 - bits as i32;
-                    if skip > 0 {
-                        br.skip(skip as usize);
-                    } else if skip < 0 {
-                        br.set_position(br.position().saturating_sub((-skip) as usize));
-                    }
-                    READ_VAL_TABLE[index]
-                }
-                _ => {
-                    let bits = MAX_BIT_TABLE[resolution as usize];
-                    let code = br.read(bits as usize);
-                    // Sign-magnitude form: sign is bit 0, magnitude is bits 1+
-                    let sign = if (code & 1) != 0 { -1i32 } else { 1i32 };
-                    let signed_code = sign * (code >> 1) as i32;
-                    if signed_code == 0 {
-                        br.set_position(br.position() - 1);
-                    }
-                    signed_code as f32
-                }
+        for i in 0..cc_count {
+            let res = resolution[i];
+            let bits = MAX_BIT_TABLE[res as usize] as usize;
+            // Read the fixed-width code; for resolution 0, bits == 0.
+            let code = br.read_hca_bits(bits);
+
+            // Net bit adjustment relative to the fixed width just consumed.
+            // Prefix codebooks may consume fewer (negative) or more (positive)
+            // bits than `bits`; sign-magnitude resolutions consume one fewer
+            // bit when the value is zero.
+            let (qc, skip): (f32, i32) = if res <= 7 {
+                let index = ((res as usize) << 4) + code as usize;
+                let skip = READ_BIT_TABLE[index] as i32 - bits as i32;
+                (READ_VAL_TABLE[index], skip)
+            } else {
+                // Sign-magnitude: bit 0 is sign, bits 1+ are magnitude.
+                let signed_code = (1 - ((code & 1) << 1) as i32) * (code >> 1) as i32;
+                let skip = if signed_code == 0 { -1 } else { 0 };
+                (signed_code as f32, skip)
             };
 
-            *sample = channel.gain[i] * qc;
+            if skip != 0 {
+                br.advance_signed(skip);
+            }
+
+            spectra[i] = gain[i] * qc;
         }
 
         // Clean rest of spectra
