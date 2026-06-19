@@ -1,4 +1,12 @@
 //! Bit-level reader for HCA decoding
+//!
+//! Uses a byte-aligned u32 accumulator with O(1) `peek`/`read`, mirroring the
+//! width-specialized bitreaders used by reference C/C++ HCA decoders. A single
+//! `peek(n)` reads up to 4 source bytes into a u32, masks off the already
+//! consumed low bits, and right-shifts to align — instead of looping per bit.
+//!
+//! `bits == 0` returns 0 and reads past EOF return 0, matching the prior
+//! per-bit `check_bit` semantics.
 
 #![allow(dead_code)]
 
@@ -23,67 +31,135 @@ impl<'a> BitReader<'a> {
     }
 
     /// Get current bit position
+    #[inline]
     pub fn position(&self) -> usize {
         self.position
     }
 
     /// Set bit position
+    #[inline]
     pub fn set_position(&mut self, pos: usize) {
         self.position = pos;
     }
 
-    /// Check if reading a single bit at a position
+    /// Peek at up to 32 bits without advancing position.
+    ///
+    /// Loads up to 4 bytes (big-endian, zero-padded past EOF) starting at the
+    /// current bit's byte, drops the already-consumed low bits, and keeps the
+    /// top `bits`. Branch-free on the fast path (>=4 bytes remaining) so it
+    /// stays cheap under the hundreds of reads per subframe.
     #[inline]
-    fn check_bit(&self, bit_pos: usize) -> u32 {
-        let byte_idx = bit_pos / 8;
-        let bit_idx = 7 - (bit_pos % 8);
-        if byte_idx < self.data.len() {
-            ((self.data[byte_idx] >> bit_idx) & 1) as u32
-        } else {
-            0
-        }
-    }
-
-    /// Peek at bits without advancing position
     pub fn peek(&self, bits: usize) -> u32 {
         if bits == 0 || bits > 32 {
             return 0;
         }
 
-        let mut value: u32 = 0;
-        for i in 0..bits {
-            value = (value << 1) | self.check_bit(self.position + i);
+        let byte_idx = self.position >> 3;
+        let bit_offset = (self.position & 7) as u32; // consumed bits in the leading byte
+
+        // Fast path: at least 4 bytes available from byte_idx. This is by far
+        // the common case since HCA blocks are hundreds of bytes and reads
+        // happen near the front.
+        let chunk = if byte_idx + 4 <= self.data.len() {
+            // Safety: bounds checked just above (byte_idx + 4 <= len).
+            unsafe {
+                let b = self.data.as_ptr().add(byte_idx);
+                u32::from_be_bytes([*b, *b.add(1), *b.add(2), *b.add(3)])
+            }
+        } else {
+            // Slow path near EOF: load available bytes, zero-pad the rest.
+            self.load_padded(byte_idx)
+        };
+
+        // Drop the already-consumed low bits, keep the top `bits`.
+        (chunk << bit_offset) >> (32 - bits)
+    }
+
+    /// Load up to 4 bytes big-endian starting at `byte_idx`, zero-padded past
+    /// EOF. Only used on the slow path when fewer than 4 bytes remain.
+    #[inline(never)]
+    fn load_padded(&self, byte_idx: usize) -> u32 {
+        let mut chunk: u32 = 0;
+        for k in 0..4 {
+            chunk <<= 8;
+            let pos = byte_idx + k;
+            if pos < self.data.len() {
+                chunk |= self.data[pos] as u32;
+            }
         }
-        value
+        chunk
     }
 
     /// Read bits and advance position
+    #[inline]
     pub fn read(&mut self, bits: usize) -> u32 {
         let value = self.peek(bits);
         self.position += bits;
         value
     }
 
+    /// Read a known-valid bit width and advance position.
+    ///
+    /// This is used by HCA hot paths where `bits` comes from fixed decoder
+    /// tables (0..=12). It keeps the public `read` semantics but avoids the
+    /// wider validation branch on every coefficient.
+    #[inline(always)]
+    pub(crate) fn read_hca_bits(&mut self, bits: usize) -> u32 {
+        debug_assert!(bits <= 32);
+        if bits == 0 {
+            return 0;
+        }
+
+        let byte_idx = self.position >> 3;
+        let bit_offset = (self.position & 7) as u32;
+
+        let chunk = if byte_idx + 4 <= self.data.len() {
+            unsafe {
+                let b = self.data.as_ptr().add(byte_idx);
+                u32::from_be_bytes([*b, *b.add(1), *b.add(2), *b.add(3)])
+            }
+        } else {
+            self.load_padded(byte_idx)
+        };
+
+        self.position += bits;
+        (chunk << bit_offset) >> (32 - bits)
+    }
+
     /// Skip bits
+    #[inline]
     pub fn skip(&mut self, bits: usize) {
         self.position += bits;
+    }
+
+    /// Advance the position by a signed amount, saturating at zero. Used by the
+    /// HCA dequantizer where prefix-codebook adjustments may be negative.
+    #[inline]
+    pub fn advance_signed(&mut self, delta: i32) {
+        if delta >= 0 {
+            self.position += delta as usize;
+        } else {
+            self.position = self.position.saturating_sub((-delta) as usize);
+        }
     }
 
     /// Read a single bit
     #[inline]
     pub fn read_bit(&mut self) -> bool {
-        let result = self.check_bit(self.position) != 0;
+        let result = self.peek(1) != 0;
         self.position += 1;
         result
     }
 
     /// Remaining bits available
+    #[inline]
     pub fn remaining_bits(&self) -> usize {
         let total_bits = self.data.len() * 8;
         total_bits.saturating_sub(self.position)
     }
 
     /// Check if there are enough bits remaining
+    #[inline]
     pub fn has_bits(&self, bits: usize) -> bool {
         self.remaining_bits() >= bits
     }
@@ -226,5 +302,43 @@ mod tests {
         writer.write(0b0100, 4);
 
         assert_eq!(writer.data()[0], 0b10110100);
+    }
+
+    #[test]
+    fn test_multi_byte_read() {
+        // Big-endian 0x12345678
+        let data = [0x12, 0x34, 0x56, 0x78];
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.read(16), 0x1234);
+        assert_eq!(reader.read(16), 0x5678);
+
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.read(4), 0x1);
+        assert_eq!(reader.read(4), 0x2);
+        assert_eq!(reader.read(8), 0x34);
+        assert_eq!(reader.read(12), 0x567);
+    }
+
+    #[test]
+    fn test_eof_pads_zero() {
+        // Reading past EOF should return 0 (matches prior per-bit semantics).
+        let data = [0xFF];
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.read(8), 0xFF);
+        assert_eq!(reader.read(4), 0); // past EOF
+        assert_eq!(reader.peek(16), 0);
+
+        // Partial byte at EOF: remaining bits returned, rest zero-padded.
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.read(4), 0xF);
+        assert_eq!(reader.read(8), 0xF0); // 4 real bits + 4 zero pad
+    }
+
+    #[test]
+    fn test_with_offset() {
+        let data = [0xAB, 0xCD, 0xEF];
+        let reader = BitReader::with_offset(&data, 1);
+        assert_eq!(reader.position(), 8);
+        assert_eq!(reader.peek(8), 0xCD);
     }
 }
