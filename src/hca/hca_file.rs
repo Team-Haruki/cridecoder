@@ -33,6 +33,7 @@ pub struct HcaDecoder<R: Read + Seek> {
     fbuf: Vec<f32>,
     current_delay: i32,
     current_block: u32,
+    reader_offset: Option<u64>,
     owns_file: bool,
 }
 
@@ -84,6 +85,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
             fbuf,
             current_delay,
             current_block: 0,
+            reader_offset: Some(header_size as u64),
             owns_file: false,
         })
     }
@@ -93,6 +95,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
         self.handle.decode_reset();
         self.current_block = 0;
         self.current_delay = self.info.encoder_delay as i32;
+        self.reader_offset = None;
     }
 
     /// Get the HCA file information
@@ -118,10 +121,13 @@ impl<R: Read + Seek> HcaDecoder<R> {
 
         let offset =
             self.info.header_size as u64 + self.current_block as u64 * self.info.block_size as u64;
-        self.reader.seek(SeekFrom::Start(offset))?;
+        if self.reader_offset != Some(offset) {
+            self.reader.seek(SeekFrom::Start(offset))?;
+        }
         self.reader.read_exact(&mut self.buf)?;
 
         self.current_block += 1;
+        self.reader_offset = Some(offset + self.info.block_size as u64);
         Ok(())
     }
 
@@ -249,6 +255,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
 
         self.current_block = loop_start_block;
         self.current_delay = loop_start_delay as i32;
+        self.reader_offset = None;
     }
 
     /// Test if a key correctly decrypts the HCA file
@@ -323,6 +330,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
         if self.reader.seek(SeekFrom::Start(offset as u64)).is_err() {
             return (-1, false, offset);
         }
+        self.reader_offset = Some(offset as u64);
 
         if self.reader.read_exact(&mut self.buf).is_err() {
             return (-1, false, offset);
@@ -336,6 +344,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
         }
 
         let new_offset = offset + self.info.block_size;
+        self.reader_offset = Some(new_offset as u64);
 
         if !(0..=HCA_KEY_MAX_FRAME_SCORE).contains(&score) {
             return (0, true, new_offset);
