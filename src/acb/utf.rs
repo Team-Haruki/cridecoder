@@ -2,9 +2,14 @@
 
 use crate::acb::consts::*;
 use crate::reader::Reader;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::io::{Read, Seek, SeekFrom};
 use thiserror::Error;
+
+/// Row/constant map for parsed UTF tables. Uses a fast non-cryptographic hasher
+/// (FxHash) since the string keys come from trusted binary tables and the
+/// per-cell hashing dominates parsing of large tables.
+pub type ValueMap = FxHashMap<String, Value>;
 
 #[derive(Error, Debug)]
 pub enum UtfError {
@@ -106,8 +111,8 @@ pub struct UtfTable {
     pub header: UtfHeader,
     pub name: String,
     pub dynamic_keys: Vec<String>,
-    pub constants: HashMap<String, Value>,
-    pub rows: Vec<HashMap<String, Value>>,
+    pub constants: ValueMap,
+    pub rows: Vec<ValueMap>,
 }
 
 const UTF_MAX_SCHEMA_SIZE: u32 = 0x8000;
@@ -204,11 +209,11 @@ impl UtfTable {
         header: &UtfHeader,
         abs_string_offset: u32,
         abs_data_offset: u32,
-    ) -> Result<(Vec<ColumnSchema>, Vec<String>, HashMap<String, Value>), UtfError> {
+    ) -> Result<(Vec<ColumnSchema>, Vec<String>, ValueMap), UtfError> {
         buf.seek(SeekFrom::Start(0x20))?;
 
         let mut dynamic_keys = Vec::new();
-        let mut constants = HashMap::new();
+        let mut constants = ValueMap::default();
         let mut schema = Vec::with_capacity(header.number_of_fields as usize);
         let mut row_column_offset: u32 = 0;
 
@@ -334,15 +339,15 @@ impl UtfTable {
         buf: &mut Reader<R>,
         header: &UtfHeader,
         schema: &[ColumnSchema],
-        constants: &HashMap<String, Value>,
+        constants: &ValueMap,
         abs_row_offset: u32,
         abs_string_offset: u32,
         abs_data_offset: u32,
-    ) -> Result<Vec<HashMap<String, Value>>, UtfError> {
+    ) -> Result<Vec<ValueMap>, UtfError> {
         let mut rows = Vec::with_capacity(header.number_of_rows as usize);
 
         for row_idx in 0..header.number_of_rows {
-            let mut row = HashMap::new();
+            let mut row = ValueMap::default();
 
             // Copy resolved constants into every row
             for (k, v) in constants.iter() {
@@ -394,17 +399,17 @@ enum ValueOrPromise {
 }
 
 /// Helper to get bytes field from a row
-pub fn get_bytes_field<'a>(row: &'a HashMap<String, Value>, key: &str) -> Option<&'a [u8]> {
+pub fn get_bytes_field<'a>(row: &'a ValueMap, key: &str) -> Option<&'a [u8]> {
     row.get(key).and_then(|v| v.as_bytes())
 }
 
 /// Helper to get string field from a row
-pub fn get_string_field<'a>(row: &'a HashMap<String, Value>, key: &str) -> Option<&'a str> {
+pub fn get_string_field<'a>(row: &'a ValueMap, key: &str) -> Option<&'a str> {
     row.get(key).and_then(|v| v.as_string())
 }
 
 /// Helper to get integer field from a row
-pub fn get_int_field(row: &HashMap<String, Value>, key: &str) -> i64 {
+pub fn get_int_field(row: &ValueMap, key: &str) -> i64 {
     row.get(key).and_then(|v| v.as_int()).unwrap_or(0)
 }
 

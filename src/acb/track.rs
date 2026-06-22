@@ -1,7 +1,7 @@
 //! Track list extraction from ACB
 
-use crate::acb::utf::{get_bytes_field, get_int_field, get_string_field, UtfTable, Value};
-use std::collections::HashMap;
+use crate::acb::utf::{get_bytes_field, get_int_field, get_string_field, UtfTable, ValueMap};
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use thiserror::Error;
 
@@ -55,18 +55,21 @@ impl TrackList {
         let name_map = build_name_map(&tables.nams);
 
         let mut tl = TrackList { tracks: Vec::new() };
-        extract_tracks_from_tables(&tables, &name_map, &mut tl)?;
+        // Track all chosen names so duplicate detection is O(1) instead of an
+        // O(n^2) scan of every prior track name.
+        let mut seen_names: HashSet<String> = HashSet::new();
+        extract_tracks_from_tables(&tables, &name_map, &mut tl, &mut seen_names)?;
 
         Ok(tl)
     }
 }
 
-fn parse_acb_tables(row: &HashMap<String, Value>) -> Result<AcbTables, TrackError> {
+fn parse_acb_tables(row: &ValueMap) -> Result<AcbTables, TrackError> {
     let table_bytes = extract_table_bytes(row)?;
     parse_utf_tables(&table_bytes)
 }
 
-fn extract_table_bytes(row: &HashMap<String, Value>) -> Result<HashMap<&str, Vec<u8>>, TrackError> {
+fn extract_table_bytes(row: &ValueMap) -> Result<HashMap<&str, Vec<u8>>, TrackError> {
     let mut tables = HashMap::new();
 
     // Required tables
@@ -151,6 +154,7 @@ fn extract_tracks_from_tables(
     tables: &AcbTables,
     name_map: &HashMap<i32, String>,
     tl: &mut TrackList,
+    seen: &mut HashSet<String>,
 ) -> Result<(), TrackError> {
     for cue_row in &tables.cues.rows {
         let ref_type = get_int_field(cue_row, "ReferenceType") as i32;
@@ -162,12 +166,12 @@ fn extract_tracks_from_tables(
 
         if let Some(seqs) = &tables.seqs {
             if ref_index < seqs.rows.len() {
-                extract_sequence_tracks(tables, name_map, ref_index, tl);
+                extract_sequence_tracks(tables, name_map, ref_index, tl, seen);
                 continue;
             }
         }
 
-        extract_direct_tracks(tables, name_map, ref_index, tl);
+        extract_direct_tracks(tables, name_map, ref_index, tl, seen);
     }
 
     Ok(())
@@ -178,6 +182,7 @@ fn extract_sequence_tracks(
     name_map: &HashMap<i32, String>,
     ref_index: usize,
     tl: &mut TrackList,
+    seen: &mut HashSet<String>,
 ) {
     if let Some(seqs) = &tables.seqs {
         let seq = &seqs.rows[ref_index];
@@ -191,7 +196,7 @@ fn extract_sequence_tracks(
                 let idx = u16::from_be_bytes([track_index_data[i * 2], track_index_data[i * 2 + 1]])
                     as usize;
                 if idx < tables.tras.rows.len() {
-                    extract_track_from_track_row(tables, name_map, ref_index as i32, idx, tl);
+                    extract_track_from_track_row(tables, name_map, ref_index as i32, idx, tl, seen);
                 }
             }
         }
@@ -203,9 +208,10 @@ fn extract_direct_tracks(
     name_map: &HashMap<i32, String>,
     ref_index: usize,
     tl: &mut TrackList,
+    seen: &mut HashSet<String>,
 ) {
     for idx in 0..tables.tras.rows.len() {
-        extract_track_from_track_row(tables, name_map, ref_index as i32, idx, tl);
+        extract_track_from_track_row(tables, name_map, ref_index as i32, idx, tl, seen);
     }
 }
 
@@ -215,6 +221,7 @@ fn extract_track_from_track_row(
     ref_index: i32,
     track_idx: usize,
     tl: &mut TrackList,
+    seen: &mut HashSet<String>,
 ) {
     let track = &tables.tras.rows[track_idx];
     let event_idx = get_int_field(track, "EventIndex") as usize;
@@ -229,19 +236,19 @@ fn extract_track_from_track_row(
         tables.wavs.as_ref(),
         name_map,
         ref_index,
-        &tl.tracks,
+        seen,
     );
 
     tl.tracks.extend(tracks);
 }
 
 fn extract_tracks_from_event(
-    track_event: &HashMap<String, Value>,
+    track_event: &ValueMap,
     syns: Option<&UtfTable>,
     wavs: Option<&UtfTable>,
     name_map: &HashMap<i32, String>,
     ref_index: i32,
-    existing_tracks: &[Track],
+    seen: &mut HashSet<String>,
 ) -> Vec<Track> {
     let mut tracks = Vec::new();
 
@@ -272,15 +279,9 @@ fn extract_tracks_from_event(
         }
 
         if cmd == 0x07d0 {
-            if let Some(track) = extract_track_from_command(
-                param_bytes,
-                syns,
-                wavs,
-                name_map,
-                ref_index,
-                existing_tracks,
-                &tracks,
-            ) {
+            if let Some(track) =
+                extract_track_from_command(param_bytes, syns, wavs, name_map, ref_index, seen)
+            {
                 tracks.push(track);
             }
         }
@@ -295,8 +296,7 @@ fn extract_track_from_command(
     wavs: Option<&UtfTable>,
     name_map: &HashMap<i32, String>,
     ref_index: i32,
-    existing_tracks: &[Track],
-    current_tracks: &[Track],
+    seen: &mut HashSet<String>,
 ) -> Option<Track> {
     if param_bytes.len() < 4 {
         return None;
@@ -347,13 +347,7 @@ fn extract_track_from_command(
     };
 
     let base_name = name_map.get(&ref_index).cloned().unwrap_or_default();
-    let name = generate_unique_name(
-        &base_name,
-        ref_index,
-        wav_id,
-        existing_tracks,
-        current_tracks,
-    );
+    let name = generate_unique_name(&base_name, ref_index, wav_id, seen);
 
     Some(Track {
         cue_id: ref_index,
@@ -369,8 +363,7 @@ fn generate_unique_name(
     base_name: &str,
     ref_index: i32,
     wav_id: i32,
-    existing_tracks: &[Track],
-    current_tracks: &[Track],
+    seen: &mut HashSet<String>,
 ) -> String {
     let name = if base_name.is_empty() {
         format!("UNKNOWN-{}", ref_index)
@@ -378,13 +371,14 @@ fn generate_unique_name(
         base_name.to_string()
     };
 
-    // Check for duplicate names
-    let is_duplicate = existing_tracks.iter().any(|t| t.name == name)
-        || current_tracks.iter().any(|t| t.name == name);
-
-    if is_duplicate {
+    // O(1) duplicate check against all previously chosen names. Matches the
+    // prior behavior: a clashing base name gets a `-{wav_id}` suffix.
+    let final_name = if seen.contains(&name) {
         format!("{}-{}", name, wav_id)
     } else {
         name
-    }
+    };
+
+    seen.insert(final_name.clone());
+    final_name
 }
