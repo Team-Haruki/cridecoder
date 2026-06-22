@@ -1138,33 +1138,74 @@ impl ClHca {
         let gain = &channel.gain;
         let resolution = &channel.resolution;
 
-        for i in 0..cc_count {
-            let res = resolution[i];
-            let bits = MAX_BIT_TABLE[res as usize] as usize;
-            // Read the fixed-width code; for resolution 0, bits == 0.
-            let code = br.read_hca_bits(bits);
+        // Register-resident, forward-only bit accumulator. Each coefficient
+        // peeks a fixed-width code and consumes the *actual* prefix length, so
+        // the bit position only ever moves forward. Keeping the next bits in a
+        // u64 avoids the per-coefficient memory reload and second position
+        // write that `read_hca_bits` + `advance_signed` incurred.
+        let data = br.data();
+        let len = data.len();
+        let start = br.position();
+        let mut byte_pos = start >> 3;
 
-            // Net bit adjustment relative to the fixed width just consumed.
-            // Prefix codebooks may consume fewer (negative) or more (positive)
-            // bits than `bits`; sign-magnitude resolutions consume one fewer
-            // bit when the value is zero.
-            let (qc, skip): (f32, i32) = if res <= 7 {
+        // MSB-first accumulator: valid bits live in the high end, low (unfilled)
+        // bits are zero, which reproduces the zero-padding-past-EOF semantics.
+        let mut acc: u64 = 0;
+        let mut nbits: u32 = 0;
+        macro_rules! refill {
+            () => {
+                while nbits <= 56 && byte_pos < len {
+                    acc |= (data[byte_pos] as u64) << (56 - nbits);
+                    nbits += 8;
+                    byte_pos += 1;
+                }
+            };
+        }
+
+        refill!();
+        // Drop the already-consumed bits in the leading byte.
+        let lead = (start & 7) as u32;
+        acc <<= lead;
+        nbits = nbits.saturating_sub(lead);
+
+        // Bits consumed relative to the byte-aligned base `(start >> 3) * 8`.
+        let mut consumed: usize = lead as usize;
+
+        for i in 0..cc_count {
+            if nbits < 32 {
+                refill!();
+            }
+
+            let res = resolution[i];
+            let bits = MAX_BIT_TABLE[res as usize] as u32;
+            // Peek the fixed-width code; for resolution 0, bits == 0.
+            let code = if bits == 0 {
+                0
+            } else {
+                (acc >> (64 - bits)) as u32
+            };
+
+            // `used` is the actual prefix length consumed: prefix codebooks
+            // (res <= 7) may be shorter than the fixed width; sign-magnitude
+            // resolutions consume one fewer bit when the value is zero.
+            let (qc, used): (f32, u32) = if res <= 7 {
                 let index = ((res as usize) << 4) + code as usize;
-                let skip = READ_BIT_TABLE[index] as i32 - bits as i32;
-                (READ_VAL_TABLE[index], skip)
+                (READ_VAL_TABLE[index], READ_BIT_TABLE[index] as u32)
             } else {
                 // Sign-magnitude: bit 0 is sign, bits 1+ are magnitude.
                 let signed_code = (1 - ((code & 1) << 1) as i32) * (code >> 1) as i32;
-                let skip = if signed_code == 0 { -1 } else { 0 };
-                (signed_code as f32, skip)
+                let used = if signed_code == 0 { bits - 1 } else { bits };
+                (signed_code as f32, used)
             };
 
-            if skip != 0 {
-                br.advance_signed(skip);
-            }
+            acc <<= used;
+            nbits = nbits.saturating_sub(used);
+            consumed += used as usize;
 
             spectra[i] = gain[i] * qc;
         }
+
+        br.set_position(((start >> 3) << 3) + consumed);
 
         // Clean rest of spectra
         spectra[cc_count..HCA_SAMPLES_PER_SUBFRAME].fill(0.0);

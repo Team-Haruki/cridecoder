@@ -36,6 +36,13 @@ impl<'a> BitReader<'a> {
         self.position
     }
 
+    /// Borrow the underlying data slice. Used by hot loops that run their own
+    /// register-resident bit accumulator and then sync `position` back.
+    #[inline]
+    pub(crate) fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
     /// Set bit position
     #[inline]
     pub fn set_position(&mut self, pos: usize) {
