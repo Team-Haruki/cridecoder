@@ -3,6 +3,9 @@
 use super::decoder::{StChannel, HCA_SAMPLES_PER_SUBFRAME};
 use super::tables::IMDCT_WINDOW;
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
 const HALF: usize = HCA_SAMPLES_PER_SUBFRAME / 2;
 
 const fn table_from_bits(hex: [[u32; 64]; 7]) -> [[f32; 64]; 7] {
@@ -240,44 +243,65 @@ fn butterfly_stage<const COUNT1: usize, const COUNT2: usize, const TEMP_SRC: boo
     spectra: *mut f32,
     temp: *mut f32,
 ) {
+    // TEMP_SRC: read temp, write spectra; else read spectra, write temp.
+    let (src, dst): (*const f32, *mut f32) = if TEMP_SRC {
+        (temp, spectra)
+    } else {
+        (spectra, temp)
+    };
+
+    #[cfg(target_arch = "aarch64")]
+    if COUNT2 >= 4 {
+        unsafe { butterfly_neon::<COUNT1, COUNT2>(src, dst) };
+        return;
+    }
+
+    // Scalar fallback (COUNT2 < 4, or non-aarch64). Bit-identical to the SIMD path.
     let mut d1_idx = 0usize;
     let mut d2_idx = COUNT2;
     let mut t1_idx = 0usize;
-
-    if TEMP_SRC {
-        for _ in 0..COUNT1 {
-            for _ in 0..COUNT2 {
-                unsafe {
-                    let a = *temp.add(t1_idx);
-                    let b = *temp.add(t1_idx + 1);
-                    t1_idx += 2;
-
-                    *spectra.add(d1_idx) = a + b;
-                    *spectra.add(d2_idx) = a - b;
-                }
-                d1_idx += 1;
-                d2_idx += 1;
+    for _ in 0..COUNT1 {
+        for _ in 0..COUNT2 {
+            unsafe {
+                let a = *src.add(t1_idx);
+                let b = *src.add(t1_idx + 1);
+                t1_idx += 2;
+                *dst.add(d1_idx) = a + b;
+                *dst.add(d2_idx) = a - b;
             }
-            d1_idx += COUNT2;
-            d2_idx += COUNT2;
+            d1_idx += 1;
+            d2_idx += 1;
         }
-    } else {
-        for _ in 0..COUNT1 {
-            for _ in 0..COUNT2 {
-                unsafe {
-                    let a = *spectra.add(t1_idx);
-                    let b = *spectra.add(t1_idx + 1);
-                    t1_idx += 2;
+        d1_idx += COUNT2;
+        d2_idx += COUNT2;
+    }
+}
 
-                    *temp.add(d1_idx) = a + b;
-                    *temp.add(d2_idx) = a - b;
-                }
-                d1_idx += 1;
-                d2_idx += 1;
-            }
-            d1_idx += COUNT2;
-            d2_idx += COUNT2;
+// NEON butterfly: deinterleave a/b pairs (vld2q), write a+b ascending and a-b
+// ascending. COUNT2 is always a multiple of 4 here. Bit-identical to scalar
+// (same IEEE add/sub, no FMA).
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn butterfly_neon<const COUNT1: usize, const COUNT2: usize>(
+    src: *const f32,
+    dst: *mut f32,
+) {
+    let mut d1 = 0usize;
+    let mut d2 = COUNT2;
+    let mut t = 0usize;
+    for _ in 0..COUNT1 {
+        let mut k = 0;
+        while k + 4 <= COUNT2 {
+            let ab = vld2q_f32(src.add(t)); // ab.0 = a[4], ab.1 = b[4]
+            vst1q_f32(dst.add(d1), vaddq_f32(ab.0, ab.1));
+            vst1q_f32(dst.add(d2), vsubq_f32(ab.0, ab.1));
+            t += 8;
+            d1 += 4;
+            d2 += 4;
+            k += 4;
         }
+        d1 += COUNT2;
+        d2 += COUNT2;
     }
 }
 
@@ -286,65 +310,89 @@ fn dct_stage<const TABLE: usize, const COUNT1: usize, const COUNT2: usize, const
     spectra: *mut f32,
     temp: *mut f32,
 ) {
+    let (src, dst): (*const f32, *mut f32) = if TEMP_SRC {
+        (temp, spectra)
+    } else {
+        (spectra, temp)
+    };
     let sin_table = &SIN_TABLES[TABLE];
     let cos_table = &COS_TABLES[TABLE];
+
+    #[cfg(target_arch = "aarch64")]
+    if COUNT2 >= 4 {
+        unsafe { dct_neon::<COUNT1, COUNT2>(src, dst, sin_table.as_ptr(), cos_table.as_ptr()) };
+        return;
+    }
+
+    // Scalar fallback (COUNT2 < 4, or non-aarch64). Bit-identical to the SIMD path.
     let mut sin_idx = 0;
     let mut cos_idx = 0;
-
     let mut d1_idx = 0usize;
     let mut d2_idx = COUNT2 * 2 - 1;
     let mut s1_idx = 0usize;
     let mut s2_idx = COUNT2;
-
-    if TEMP_SRC {
-        for _ in 0..COUNT1 {
-            for _ in 0..COUNT2 {
-                unsafe {
-                    let a = *temp.add(s1_idx);
-                    let b = *temp.add(s2_idx);
-                    s1_idx += 1;
-                    s2_idx += 1;
-
-                    let sin = sin_table[sin_idx];
-                    let cos = cos_table[cos_idx];
-                    sin_idx += 1;
-                    cos_idx += 1;
-
-                    *spectra.add(d1_idx) = a * sin - b * cos;
-                    *spectra.add(d2_idx) = a * cos + b * sin;
-                }
-                d1_idx += 1;
-                d2_idx -= 1;
+    for _ in 0..COUNT1 {
+        for _ in 0..COUNT2 {
+            unsafe {
+                let a = *src.add(s1_idx);
+                let b = *src.add(s2_idx);
+                s1_idx += 1;
+                s2_idx += 1;
+                let sin = sin_table[sin_idx];
+                let cos = cos_table[cos_idx];
+                sin_idx += 1;
+                cos_idx += 1;
+                *dst.add(d1_idx) = a * sin - b * cos;
+                *dst.add(d2_idx) = a * cos + b * sin;
             }
-            s1_idx += COUNT2;
-            s2_idx += COUNT2;
-            d1_idx += COUNT2;
-            d2_idx += COUNT2 * 3;
+            d1_idx += 1;
+            d2_idx -= 1;
         }
-    } else {
-        for _ in 0..COUNT1 {
-            for _ in 0..COUNT2 {
-                unsafe {
-                    let a = *spectra.add(s1_idx);
-                    let b = *spectra.add(s2_idx);
-                    s1_idx += 1;
-                    s2_idx += 1;
+        s1_idx += COUNT2;
+        s2_idx += COUNT2;
+        d1_idx += COUNT2;
+        d2_idx += COUNT2 * 3;
+    }
+}
 
-                    let sin = sin_table[sin_idx];
-                    let cos = cos_table[cos_idx];
-                    sin_idx += 1;
-                    cos_idx += 1;
-
-                    *temp.add(d1_idx) = a * sin - b * cos;
-                    *temp.add(d2_idx) = a * cos + b * sin;
-                }
-                d1_idx += 1;
-                d2_idx -= 1;
-            }
-            s1_idx += COUNT2;
-            s2_idx += COUNT2;
-            d1_idx += COUNT2;
-            d2_idx += COUNT2 * 3;
+// NEON DCT-IV butterfly. d1 ascending = a*sin - b*cos; d2 descends (d2, d2-1,
+// d2-2, d2-3) = a*cos + b*sin, so compute the vector, lane-reverse it, and store
+// at the block's low end (d2-3). COUNT2 is a multiple of 4 here. Uses
+// vmulq + vsubq/vaddq (no FMA) to stay bit-identical to the scalar path.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn dct_neon<const COUNT1: usize, const COUNT2: usize>(
+    src: *const f32,
+    dst: *mut f32,
+    sin_table: *const f32,
+    cos_table: *const f32,
+) {
+    let mut tbl = 0usize;
+    let mut d1 = 0usize;
+    let mut d2 = COUNT2 * 2 - 1;
+    let mut s1 = 0usize;
+    let mut s2 = COUNT2;
+    for _ in 0..COUNT1 {
+        let mut k = 0;
+        while k + 4 <= COUNT2 {
+            let a = vld1q_f32(src.add(s1));
+            let b = vld1q_f32(src.add(s2));
+            let sin = vld1q_f32(sin_table.add(tbl));
+            let cos = vld1q_f32(cos_table.add(tbl));
+            vst1q_f32(dst.add(d1), vsubq_f32(vmulq_f32(a, sin), vmulq_f32(b, cos)));
+            let d2v = vaddq_f32(vmulq_f32(a, cos), vmulq_f32(b, sin));
+            let rev = vextq_f32::<2>(vrev64q_f32(d2v), vrev64q_f32(d2v));
+            vst1q_f32(dst.add(d2 - 3), rev);
+            s1 += 4;
+            s2 += 4;
+            tbl += 4;
+            d1 += 4;
+            d2 -= 4;
+            k += 4;
         }
+        s1 += COUNT2;
+        s2 += COUNT2;
+        d1 += COUNT2;
+        d2 += COUNT2 * 3;
     }
 }
