@@ -1085,8 +1085,11 @@ impl ClHca {
             let mut new_resolution = 0u8;
 
             if scalefactor > 0 {
-                let noise_level =
-                    self.ath_curve[i] as i32 + ((packed_noise_level as i32 + i as i32) >> 8);
+                // clHCA keeps packed_noise_level unsigned: (packed_noise_level + i) >> 8 is a
+                // logical shift (hca.cpp:1456). Casting to i32 before >>8 made it arithmetic,
+                // diverging when frame_acceptable_noise_level==0 wraps the high bit on.
+                let noise_level = self.ath_curve[i] as i32
+                    + ((packed_noise_level.wrapping_add(i as u32) >> 8) as i32);
                 let curve_position = noise_level + 1 - ((5 * scalefactor as i32) >> 1);
 
                 if curve_position < 0 {

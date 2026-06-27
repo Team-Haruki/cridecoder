@@ -1333,4 +1333,56 @@ mod tests {
         let decoded = decoder.decode_all().unwrap();
         assert!(!decoded.is_empty());
     }
+
+    #[test]
+    fn test_decode_with_keycode_and_subkey() {
+        // pjsk-style type-56 HCA is keyed by a global keycode + a per-AWB subkey;
+        // HcaDecoder::set_encryption_key combines them into the effective key. Encode
+        // with that effective key, then verify decode via keycode+subkey succeeds.
+        // enc/dec are nested fns so each large ClHca struct lives in its own stack
+        // frame, reclaimed on return (debug builds don't reuse block-local slots,
+        // so several decoders in one frame would blow the 2 MB test-thread stack).
+        fn enc(samples: &[f32], key: Option<u64>) -> Vec<u8> {
+            let mut cfg = HcaEncoderConfig::new(44100, 1);
+            if let Some(k) = key {
+                cfg = cfg.with_encryption(k);
+            }
+            let mut e = HcaEncoder::new(cfg).unwrap();
+            let mut o = std::io::Cursor::new(Vec::new());
+            e.encode(samples, &mut o).unwrap();
+            o.into_inner()
+        }
+        fn dec(data: Vec<u8>, key: Option<(u64, u64)>) -> Vec<f32> {
+            let mut d = crate::hca::HcaDecoder::from_reader(std::io::Cursor::new(data)).unwrap();
+            if let Some((k, s)) = key {
+                d.set_encryption_key(k, s);
+            }
+            d.decode_all().unwrap()
+        }
+
+        let keycode: u64 = 0x0011_2233_4455_6677;
+        let subkey: u16 = 0x1234;
+        let multiplier = ((subkey as u64) << 16) | ((!subkey as u64).wrapping_add(2));
+        let effective = keycode.wrapping_mul(multiplier);
+
+        let samples: Vec<f32> = (0..HCA_SAMPLES_PER_FRAME * 2)
+            .map(|i| (2.0 * PI * 440.0 * i as f32 / 44100.0).sin() * 0.3)
+            .collect();
+
+        let encrypted = enc(&samples, Some(effective));
+        assert_eq!(encrypted[0], 0xC8); // encrypted HCA magic (high bit set)
+
+        // Decode the encrypted stream via keycode+subkey; must match the plain encode.
+        let decrypted = dec(encrypted, Some((keycode, subkey as u64)));
+        let plain = dec(enc(&samples, None), None);
+
+        assert!(!decrypted.is_empty());
+        assert_eq!(plain.len(), decrypted.len());
+        let max_diff = plain
+            .iter()
+            .zip(&decrypted)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_diff == 0.0, "keycode+subkey must recover identical PCM");
+    }
 }

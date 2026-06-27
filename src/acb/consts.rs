@@ -52,7 +52,9 @@ pub fn wave_type_extension(enc_type: i32) -> &'static str {
         WAVEFORM_ENCODE_TYPE_HCA => ".hca",
         WAVEFORM_ENCODE_TYPE_WII_ADPCM => ".wiiadpcm",
         WAVEFORM_ENCODE_TYPE_DS_ADPCM => ".dsadpcm",
-        WAVEFORM_ENCODE_TYPE_HCA_MX => ".hcamx",
+        // HCA-MX is a standard HCA bitstream (HCA\0 magic); vgmstream awb.c:178
+        // and PyCriCodecs both return ".hca" for type 6.
+        WAVEFORM_ENCODE_TYPE_HCA_MX => ".hca",
         WAVEFORM_ENCODE_TYPE_VAG | WAVEFORM_ENCODE_TYPE_HEVAG => ".vag",
         WAVEFORM_ENCODE_TYPE_ATRAC3 => ".at3",
         WAVEFORM_ENCODE_TYPE_BCWAV => ".bcwav",
@@ -83,7 +85,7 @@ mod tests {
             wave_type_extension(WAVEFORM_ENCODE_TYPE_DS_ADPCM),
             ".dsadpcm"
         );
-        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_HCA_MX), ".hcamx");
+        assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_HCA_MX), ".hca");
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_VAG), ".vag");
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_ATRAC3), ".at3");
         assert_eq!(wave_type_extension(WAVEFORM_ENCODE_TYPE_BCWAV), ".bcwav");

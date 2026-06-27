@@ -168,13 +168,20 @@ fn build_music_acb_bytes(
 /// Returns:
 ///     dict with HCA info (sample_rate, channels, block_count, etc.)
 #[pyfunction]
+#[pyo3(signature = (hca_path, wav_path, key=None, subkey=None))]
 fn decode_hca<'py>(
     py: Python<'py>,
     hca_path: &str,
     wav_path: &str,
+    key: Option<u64>,
+    subkey: Option<u64>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let mut decoder = HcaDecoder::from_file(hca_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to open HCA: {}", e)))?;
+    // Apply the decryption key for type-56 encrypted HCA (no-op for unencrypted files).
+    if let Some(k) = key {
+        decoder.set_encryption_key(k, subkey.unwrap_or(0));
+    }
 
     let info = decoder.info().clone();
 
@@ -204,9 +211,13 @@ fn decode_hca<'py>(
 /// Returns:
 ///     WAV file data as bytes
 #[pyfunction]
-fn decode_hca_bytes(hca_data: &[u8]) -> PyResult<Vec<u8>> {
+#[pyo3(signature = (hca_data, key=None, subkey=None))]
+fn decode_hca_bytes(hca_data: &[u8], key: Option<u64>, subkey: Option<u64>) -> PyResult<Vec<u8>> {
     let mut decoder = HcaDecoder::from_reader(Cursor::new(hca_data.to_vec()))
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse HCA: {}", e)))?;
+    if let Some(k) = key {
+        decoder.set_encryption_key(k, subkey.unwrap_or(0));
+    }
 
     let mut wav_buf = Vec::new();
     decoder

@@ -35,6 +35,9 @@ pub struct HcaDecoder<R: Read + Seek> {
     current_block: u32,
     reader_offset: Option<u64>,
     owns_file: bool,
+    /// Valid output sample frames emitted so far (after front-delay trim), used to
+    /// drop the trailing encoder_padding so total output matches CRI's count.
+    samples_written: u64,
 }
 
 impl HcaDecoder<File> {
@@ -87,6 +90,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
             current_block: 0,
             reader_offset: Some(header_size as u64),
             owns_file: false,
+            samples_written: 0,
         })
     }
 
@@ -96,11 +100,20 @@ impl<R: Read + Seek> HcaDecoder<R> {
         self.current_block = 0;
         self.current_delay = self.info.encoder_delay as i32;
         self.reader_offset = None;
+        self.samples_written = 0;
     }
 
     /// Get the HCA file information
     pub fn info(&self) -> &HcaInfo {
         &self.info
+    }
+
+    /// CRI's canonical valid sample-frame count:
+    /// block_count*samples_per_block - encoder_delay - encoder_padding (hca.h:56).
+    fn total_valid_samples(&self) -> u64 {
+        (self.info.block_count as u64 * self.info.samples_per_block as u64)
+            .saturating_sub(self.info.encoder_delay as u64)
+            .saturating_sub(self.info.encoder_padding as u64)
     }
 
     /// Set the decryption key
@@ -157,7 +170,13 @@ impl<R: Read + Seek> HcaDecoder<R> {
         }
 
         let start_idx = discard as usize * self.info.channel_count as usize;
-        let num_samples = (samples - discard) as usize;
+        let mut num_samples = (samples - discard) as usize;
+        // Drop trailing encoder_padding: cap cumulative output at the valid count.
+        let remaining = self.total_valid_samples().saturating_sub(self.samples_written);
+        if num_samples as u64 > remaining {
+            num_samples = remaining as usize;
+        }
+        self.samples_written += num_samples as u64;
         Ok((&self.fbuf[start_idx..], num_samples))
     }
 
@@ -192,7 +211,14 @@ impl<R: Read + Seek> HcaDecoder<R> {
             pcm.copy_within(start..frame_len, 0);
         }
 
-        Ok((samples - discard) as usize)
+        let mut num_samples = (samples - discard) as usize;
+        // Drop trailing encoder_padding: cap cumulative output at the valid count.
+        let remaining = self.total_valid_samples().saturating_sub(self.samples_written);
+        if num_samples as u64 > remaining {
+            num_samples = remaining as usize;
+        }
+        self.samples_written += num_samples as u64;
+        Ok(num_samples)
     }
 
     /// Decode the entire HCA file and return all samples
@@ -357,8 +383,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
     pub fn decode_to_wav<W: Write>(&mut self, w: &mut W) -> Result<(), HcaDecoderError> {
         self.reset();
 
-        let total_samples = (self.info.block_count * self.info.samples_per_block as u32)
-            .saturating_sub(self.info.encoder_delay) as usize;
+        let total_samples = self.total_valid_samples() as usize;
         let total_pcm_bytes = total_samples * self.info.channel_count as usize * 2;
 
         // Write WAV header
