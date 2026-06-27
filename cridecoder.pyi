@@ -9,6 +9,8 @@ from typing import Optional
 
 __all__ = [
     "extract_acb",
+    "extract_acb_tracks",
+    "decode_acb_to_wav",
     "build_acb",
     "build_acb_bytes",
     "build_music_acb_bytes",
@@ -28,6 +30,30 @@ def extract_acb(acb_path: str, output_dir: str) -> Optional[list[str]]:
     """Extract audio tracks from an ACB file to ``output_dir``.
 
     Returns the list of written file paths, or ``None`` if the file is invalid.
+    """
+    ...
+
+def extract_acb_tracks(
+    acb_path: str, output_dir: str
+) -> Optional[list[dict[str, object]]]:
+    """Extract audio tracks from an ACB, returning per-track metadata.
+
+    Like :func:`extract_acb`, but each entry is a dict with ``path`` (written
+    file), ``name`` (cue name), ``cue_id`` and ``subkey`` — the AFS2 subkey of
+    the originating AWB, needed (with the global keycode) to decode type-56
+    encrypted HCA. Returns ``None`` if the file is invalid.
+    """
+    ...
+
+def decode_acb_to_wav(
+    acb_path: str, output_dir: str, key: Optional[int] = ...
+) -> list[str]:
+    """Extract an ACB and decode its HCA tracks straight to WAV files.
+
+    The per-AWB AFS2 subkey is applied automatically, so encrypted (type-56)
+    ACBs only need the global ``key`` (omit/``None`` for unencrypted ACBs).
+    Non-HCA tracks are written verbatim with their original extension. Returns
+    the list of written file paths.
     """
     ...
 

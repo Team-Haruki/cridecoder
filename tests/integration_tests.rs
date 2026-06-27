@@ -559,6 +559,43 @@ fn test_acb_builder_basic() {
     assert_eq!(&extracted_data[0..4], b"HCA\x00");
 }
 
+/// Test extract_acb_tracks surfaces per-track metadata (path, cue id, subkey)
+#[test]
+fn test_acb_extract_tracks_metadata() {
+    use cridecoder::{extract_acb_tracks_from_file, AcbBuilder, TrackInput};
+
+    let dummy_hca = create_minimal_hca_header();
+    let mut builder = AcbBuilder::new();
+    builder.add_track(TrackInput::new("meta_track", 7, dummy_hca));
+
+    let mut output = Vec::new();
+    builder
+        .build(&mut Cursor::new(&mut output), None)
+        .expect("ACB build should succeed");
+
+    let dir = tempfile::tempdir().unwrap();
+    let acb_path = dir.path().join("built.acb");
+    std::fs::write(&acb_path, &output).unwrap();
+
+    let tracks = extract_acb_tracks_from_file(&acb_path, dir.path())
+        .expect("extract should succeed")
+        .expect("built ACB should be valid");
+
+    assert_eq!(tracks.len(), 1, "Should extract one track");
+    let track = &tracks[0];
+    assert_eq!(track.name, "meta_track");
+    // cue_id is the cue-table index (the builder lays a single track at cue 0).
+    assert_eq!(track.cue_id, 0);
+    // An unencrypted (builder-produced) AWB has no subkey.
+    assert_eq!(track.subkey, 0);
+    assert!(
+        std::path::Path::new(&track.path).exists(),
+        "Written track file should exist"
+    );
+    let data = std::fs::read(&track.path).expect("Should read extracted track");
+    assert_eq!(&data[0..4], b"HCA\x00");
+}
+
 /// Test ACB builder keeps Waveform AWB ids aligned with non-zero cue ids
 #[test]
 fn test_acb_builder_nonzero_cue_id() {
