@@ -107,7 +107,7 @@ impl<R: Read + Seek> Reader<R> {
             }
             buf.push(b);
         }
-        Ok(String::from_utf8_lossy(&buf).into_owned())
+        Ok(decode_cri_string(&buf))
     }
 
     /// Read null-terminated string at offset, then restore position
@@ -118,6 +118,23 @@ impl<R: Read + Seek> Reader<R> {
         self.inner.seek(SeekFrom::Start(pos))?;
         result
     }
+}
+
+/// Decode a CRI @UTF string. CRI tables store names as UTF-8, Shift-JIS, or
+/// UTF-16; try them in that order (PyCriCodecs utf.py) before lossy fallback.
+pub fn decode_cri_string(buf: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(buf) {
+        return s.to_string();
+    }
+    let (s, _, had_errors) = encoding_rs::SHIFT_JIS.decode(buf);
+    if !had_errors {
+        return s.into_owned();
+    }
+    let (s16, _, had_errors16) = encoding_rs::UTF_16LE.decode(buf);
+    if !had_errors16 {
+        return s16.into_owned();
+    }
+    String::from_utf8_lossy(buf).into_owned()
 }
 
 /// Calculate alignment

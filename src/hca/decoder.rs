@@ -387,7 +387,7 @@ impl ClHca {
     fn decode_chunks(&mut self, br: &mut BitReader) -> Result<(), HcaError> {
         self.decode_fmt_chunk(br)?;
         self.decode_comp_dec_chunk(br)?;
-        self.decode_vbr_chunk(br);
+        self.decode_vbr_chunk(br)?;
         self.decode_ath_chunk(br);
         self.decode_loop_chunk(br)?;
         self.decode_cipher_chunk(br)?;
@@ -471,16 +471,24 @@ impl ClHca {
         Ok(())
     }
 
-    fn decode_vbr_chunk(&mut self, br: &mut BitReader) {
+    fn decode_vbr_chunk(&mut self, br: &mut BitReader) -> Result<(), HcaError> {
         if (br.peek(32) & HCA_MASK) == 0x76627200 {
             // "vbr\0"
             br.skip(32);
             self.vbr_max_frame_size = br.read(16);
             self.vbr_noise_level = br.read(16);
+            // clhca.c: a vbr chunk requires frame_size==0 and 8 < max <= 0x1FF.
+            if self.frame_size != 0
+                || self.vbr_max_frame_size <= 8
+                || self.vbr_max_frame_size > 0x1FF
+            {
+                return Err(HcaError::InvalidHeader);
+            }
         } else {
             self.vbr_max_frame_size = 0;
             self.vbr_noise_level = 0;
         }
+        Ok(())
     }
 
     fn decode_ath_chunk(&mut self, br: &mut BitReader) {

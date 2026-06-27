@@ -23,6 +23,8 @@ pub enum UtfError {
     SchemaTooLarge(u32),
     #[error("UTF offset out of bounds")]
     OffsetOutOfBounds,
+    #[error("Unsupported @UTF version: {0}")]
+    UnsupportedVersion(u16),
     #[error("Unknown column flag: 0x{0:02X}")]
     UnknownColumnFlag(u8),
     #[error("Unknown column type: 0x{0:02X}")]
@@ -147,7 +149,10 @@ impl UtfTable {
         let abs_string_offset = header.string_table_offset + 8;
         let abs_data_offset = header.data_offset + 8;
 
-        // Validation (matching vgmstream)
+        // Validation (matching vgmstream cri_utf.c)
+        if header.version != 0 && header.version != 1 {
+            return Err(UtfError::UnsupportedVersion(header.version));
+        }
         let schema_offset: u32 = 0x20;
         let schema_size = abs_row_offset - schema_offset;
         if header.number_of_fields == 0 {
