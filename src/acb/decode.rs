@@ -4,13 +4,13 @@
 //! an ACB to decoded audio without managing the intermediate HCA bytes
 //! themselves. The per-AWB AFS2 subkey is applied automatically.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 
 use thiserror::Error;
 
-use crate::acb::extractor::{extract_acb_to_memory, ExtractError};
+use crate::acb::extractor::{extract_acb_to_memory, read_validated_acb, ExtractError};
 use crate::hca::{HcaDecoder, HcaDecoderError};
 
 /// A decoded ACB track held in memory.
@@ -102,6 +102,11 @@ pub fn decode_acb_to_wav_from_file(
     target_dir: &Path,
     key: Option<u64>,
 ) -> Result<Vec<String>, DecodeAcbError> {
-    let file = File::open(acb_path)?;
-    decode_acb_to_wav(file, target_dir, Some(acb_path), key)
+    // Slurp once so the parser reads from memory instead of issuing many small
+    // syscalls against the file handle.
+    let data = match read_validated_acb(acb_path)? {
+        Some(d) => d,
+        None => return Ok(Vec::new()),
+    };
+    decode_acb_to_wav(Cursor::new(data), target_dir, Some(acb_path), key)
 }

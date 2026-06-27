@@ -122,7 +122,7 @@ fn extract_acb_bytes<'py>(
     py: Python<'py>,
     acb_data: &[u8],
 ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
-    let tracks = acb::extract_acb_to_memory(Cursor::new(acb_data.to_vec()), None)
+    let tracks = acb::extract_acb_to_memory(Cursor::new(acb_data), None)
         .map_err(|e| PyRuntimeError::new_err(format!("ACB extraction failed: {}", e)))?;
 
     let mut out = Vec::with_capacity(tracks.len());
@@ -158,7 +158,7 @@ fn decode_acb_to_wav_bytes<'py>(
     acb_data: &[u8],
     key: Option<u64>,
 ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
-    let tracks = acb::decode_acb_to_wav_to_memory(Cursor::new(acb_data.to_vec()), None, key)
+    let tracks = acb::decode_acb_to_wav_to_memory(Cursor::new(acb_data), None, key)
         .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))?;
 
     let mut out = Vec::with_capacity(tracks.len());
@@ -349,7 +349,7 @@ fn decode_hca<'py>(
 #[pyfunction]
 #[pyo3(signature = (hca_data, key=None, subkey=None))]
 fn decode_hca_bytes(hca_data: &[u8], key: Option<u64>, subkey: Option<u64>) -> PyResult<Vec<u8>> {
-    let mut decoder = HcaDecoder::from_reader(Cursor::new(hca_data.to_vec()))
+    let mut decoder = HcaDecoder::from_reader(Cursor::new(hca_data))
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse HCA: {}", e)))?;
     if let Some(k) = key {
         decoder.set_encryption_key(k, subkey.unwrap_or(0));
@@ -587,9 +587,8 @@ fn extract_usm_bytes<'py>(
     key: Option<u64>,
     export_audio: bool,
 ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
-    let streams =
-        usm::extract_usm_to_memory(Cursor::new(usm_data.to_vec()), b"", key, export_audio)
-            .map_err(|e| PyRuntimeError::new_err(format!("USM extraction failed: {}", e)))?;
+    let streams = usm::extract_usm_to_memory(Cursor::new(usm_data), b"", key, export_audio)
+        .map_err(|e| PyRuntimeError::new_err(format!("USM extraction failed: {}", e)))?;
 
     let mut out = Vec::with_capacity(streams.len());
     for stream in streams {

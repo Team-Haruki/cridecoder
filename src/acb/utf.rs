@@ -408,6 +408,15 @@ pub fn get_bytes_field<'a>(row: &'a ValueMap, key: &str) -> Option<&'a [u8]> {
     row.get(key).and_then(|v| v.as_bytes())
 }
 
+/// Move (take ownership of) a bytes field out of a row, leaving an empty
+/// placeholder. Avoids cloning large embedded blobs such as the embedded AWB.
+pub fn take_bytes_field(row: &mut ValueMap, key: &str) -> Option<Vec<u8>> {
+    match row.get_mut(key) {
+        Some(Value::Data(d)) => Some(std::mem::take(d)),
+        _ => None,
+    }
+}
+
 /// Helper to get string field from a row
 pub fn get_string_field<'a>(row: &'a ValueMap, key: &str) -> Option<&'a str> {
     row.get(key).and_then(|v| v.as_string())

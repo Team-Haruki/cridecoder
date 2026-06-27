@@ -3,8 +3,8 @@
 use crate::acb::afs::AfsArchive;
 use crate::acb::consts::wave_type_extension;
 use crate::acb::track::{Track, TrackList};
-use crate::acb::utf::{get_bytes_field, get_string_field, UtfTable};
-use std::fs::{self, File};
+use crate::acb::utf::{get_bytes_field, get_string_field, take_bytes_field, UtfTable};
+use std::fs;
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use thiserror::Error;
@@ -42,11 +42,11 @@ pub fn extract_acb<R: Read + Seek>(
     target_dir: &Path,
     acb_file_path: Option<&Path>,
 ) -> Result<Vec<String>, ExtractError> {
-    let utf = UtfTable::new(acb_file)?;
+    let mut utf = UtfTable::new(acb_file)?;
 
     let track_list = TrackList::new(&utf)?;
 
-    let mut embedded_awb = load_embedded_awb(&utf.rows[0]);
+    let mut embedded_awb = load_embedded_awb(&mut utf.rows[0]);
     let mut external_awbs = load_external_awbs(&utf.rows[0], acb_file_path);
 
     extract_all_tracks(
@@ -62,9 +62,9 @@ pub fn extract_acb_to_memory<R: Read + Seek>(
     acb_file: R,
     acb_file_path: Option<&Path>,
 ) -> Result<Vec<ExtractedAcbTrack>, ExtractError> {
-    let utf = UtfTable::new(acb_file)?;
+    let mut utf = UtfTable::new(acb_file)?;
     let track_list = TrackList::new(&utf)?;
-    let mut embedded_awb = load_embedded_awb(&utf.rows[0]);
+    let mut embedded_awb = load_embedded_awb(&mut utf.rows[0]);
     let mut external_awbs = load_external_awbs(&utf.rows[0], acb_file_path);
 
     let mut outputs = Vec::new();
@@ -91,12 +91,14 @@ pub fn extract_acb_to_memory<R: Read + Seek>(
     Ok(outputs)
 }
 
-fn load_embedded_awb(row: &crate::acb::utf::ValueMap) -> Option<AfsArchive<Cursor<Vec<u8>>>> {
-    let awb_data = get_bytes_field(row, "AwbFile")?;
+fn load_embedded_awb(row: &mut crate::acb::utf::ValueMap) -> Option<AfsArchive<Cursor<Vec<u8>>>> {
+    // Move the embedded AWB bytes out of the UTF cell rather than cloning them
+    // (the embedded AWB is often several MB).
+    let awb_data = take_bytes_field(row, "AwbFile")?;
     if awb_data.is_empty() {
         return None;
     }
-    AfsArchive::new(Cursor::new(awb_data.to_vec())).ok()
+    AfsArchive::new(Cursor::new(awb_data)).ok()
 }
 
 fn load_external_awbs(
@@ -233,9 +235,9 @@ pub fn extract_acb_tracks<R: Read + Seek>(
     target_dir: &Path,
     acb_file_path: Option<&Path>,
 ) -> Result<Vec<ExtractedTrackFile>, ExtractError> {
-    let utf = UtfTable::new(acb_file)?;
+    let mut utf = UtfTable::new(acb_file)?;
     let track_list = TrackList::new(&utf)?;
-    let mut embedded_awb = load_embedded_awb(&utf.rows[0]);
+    let mut embedded_awb = load_embedded_awb(&mut utf.rows[0]);
     let mut external_awbs = load_external_awbs(&utf.rows[0], acb_file_path);
 
     fs::create_dir_all(target_dir)?;
@@ -281,30 +283,25 @@ fn extract_single_track_file(
     }))
 }
 
-/// Open and validate an ACB file, returning the seekable handle positioned at
-/// the start, or `None` if the path is missing or is not a valid ACB.
-fn open_validated_acb(acb_path: &Path) -> Result<Option<File>, ExtractError> {
-    let info = match fs::metadata(acb_path) {
-        Ok(i) => i,
+/// Read and validate an ACB file into memory, returning its bytes or `None` if
+/// the path is missing or is not a valid ACB.
+///
+/// Slurping the whole file once (instead of parsing straight from the `File`)
+/// turns the parser's many small `seek`/`read` calls into in-memory pointer
+/// math rather than syscalls — a large win on the file-based entry points.
+pub fn read_validated_acb(acb_path: &Path) -> Result<Option<Vec<u8>>, ExtractError> {
+    let data = match fs::read(acb_path) {
+        Ok(d) => d,
         Err(_) => return Ok(None),
     };
 
-    // A valid ACB file must have at least @UTF magic (4 bytes) + header (28 bytes) = 32 bytes
-    if info.len() < 32 {
+    // A valid ACB file must have at least @UTF magic (4 bytes) + header (28 bytes) = 32 bytes,
+    // and start with the @UTF magic (0x40 0x55 0x54 0x46).
+    if data.len() < 32 || data[0..4] != [0x40, 0x55, 0x54, 0x46] {
         return Ok(None);
     }
 
-    let mut file = File::open(acb_path)?;
-
-    // Read and validate the @UTF magic (0x40 0x55 0x54 0x46)
-    let mut header = [0u8; 4];
-    file.read_exact(&mut header)?;
-    if header != [0x40, 0x55, 0x54, 0x46] {
-        return Ok(None); // Not a valid ACB file
-    }
-
-    file.seek(std::io::SeekFrom::Start(0))?;
-    Ok(Some(file))
+    Ok(Some(data))
 }
 
 /// Convenience function to extract from a file path
@@ -312,11 +309,11 @@ pub fn extract_acb_from_file(
     acb_path: &Path,
     target_dir: &Path,
 ) -> Result<Option<Vec<String>>, ExtractError> {
-    let file = match open_validated_acb(acb_path)? {
-        Some(f) => f,
+    let data = match read_validated_acb(acb_path)? {
+        Some(d) => d,
         None => return Ok(None),
     };
-    let outputs = extract_acb(file, target_dir, Some(acb_path))?;
+    let outputs = extract_acb(Cursor::new(data), target_dir, Some(acb_path))?;
     Ok(Some(outputs))
 }
 
@@ -326,10 +323,10 @@ pub fn extract_acb_tracks_from_file(
     acb_path: &Path,
     target_dir: &Path,
 ) -> Result<Option<Vec<ExtractedTrackFile>>, ExtractError> {
-    let file = match open_validated_acb(acb_path)? {
-        Some(f) => f,
+    let data = match read_validated_acb(acb_path)? {
+        Some(d) => d,
         None => return Ok(None),
     };
-    let outputs = extract_acb_tracks(file, target_dir, Some(acb_path))?;
+    let outputs = extract_acb_tracks(Cursor::new(data), target_dir, Some(acb_path))?;
     Ok(Some(outputs))
 }
