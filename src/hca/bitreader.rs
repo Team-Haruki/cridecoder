@@ -61,6 +61,12 @@ impl<'a> BitReader<'a> {
             return 0;
         }
 
+        // Out-of-range reads return a full zero (matches vgmstream clhca.c bitreader),
+        // rather than keeping the available high bits and zero-padding the low ones.
+        if self.position + bits > self.data.len() * 8 {
+            return 0;
+        }
+
         let byte_idx = self.position >> 3;
         let bit_offset = (self.position & 7) as u32; // consumed bits in the leading byte
 
@@ -327,18 +333,19 @@ mod tests {
     }
 
     #[test]
-    fn test_eof_pads_zero() {
-        // Reading past EOF should return 0 (matches prior per-bit semantics).
+    fn test_eof_reads_return_zero() {
+        // An out-of-range read returns a full zero (matches vgmstream clhca.c),
+        // not the available high bits with zero-padded low bits.
         let data = [0xFF];
         let mut reader = BitReader::new(&data);
         assert_eq!(reader.read(8), 0xFF);
         assert_eq!(reader.read(4), 0); // past EOF
         assert_eq!(reader.peek(16), 0);
 
-        // Partial byte at EOF: remaining bits returned, rest zero-padded.
+        // A read that crosses the end returns 0 entirely, not a partial value.
         let mut reader = BitReader::new(&data);
-        assert_eq!(reader.read(4), 0xF);
-        assert_eq!(reader.read(8), 0xF0); // 4 real bits + 4 zero pad
+        assert_eq!(reader.read(4), 0xF); // fully in range
+        assert_eq!(reader.read(8), 0); // crosses EOF -> full zero
     }
 
     #[test]

@@ -156,22 +156,28 @@ fn extract_tracks_from_tables(
     tl: &mut TrackList,
     seen: &mut HashSet<String>,
 ) -> Result<(), TrackError> {
-    for cue_row in &tables.cues.rows {
+    for (cue_index, cue_row) in tables.cues.rows.iter().enumerate() {
         let ref_type = get_int_field(cue_row, "ReferenceType") as i32;
+        // vgmstream skips cues with an unhandled ReferenceType rather than failing
+        // the whole ACB (acb.c). We handle 3 (Sequence) and 8 (BlockSequence).
         if ref_type != 3 && ref_type != 8 {
-            return Err(TrackError::UnsupportedRefType(ref_type));
+            continue;
         }
 
+        // The cue NAME binds to the cue's row position (CueIndex); ReferenceIndex
+        // only indexes the Sequence/Synth tables for descent. They differ when
+        // CueTable order != SequenceTable order, so thread both (vgmstream acb.c).
+        let cue_index = cue_index as i32;
         let ref_index = get_int_field(cue_row, "ReferenceIndex") as usize;
 
         if let Some(seqs) = &tables.seqs {
             if ref_index < seqs.rows.len() {
-                extract_sequence_tracks(tables, name_map, ref_index, tl, seen);
+                extract_sequence_tracks(tables, name_map, ref_index, cue_index, tl, seen);
                 continue;
             }
         }
 
-        extract_direct_tracks(tables, name_map, ref_index, tl, seen);
+        extract_direct_tracks(tables, name_map, cue_index, tl, seen);
     }
 
     Ok(())
@@ -181,6 +187,7 @@ fn extract_sequence_tracks(
     tables: &AcbTables,
     name_map: &HashMap<i32, String>,
     ref_index: usize,
+    cue_index: i32,
     tl: &mut TrackList,
     seen: &mut HashSet<String>,
 ) {
@@ -196,7 +203,7 @@ fn extract_sequence_tracks(
                 let idx = u16::from_be_bytes([track_index_data[i * 2], track_index_data[i * 2 + 1]])
                     as usize;
                 if idx < tables.tras.rows.len() {
-                    extract_track_from_track_row(tables, name_map, ref_index as i32, idx, tl, seen);
+                    extract_track_from_track_row(tables, name_map, cue_index, idx, tl, seen);
                 }
             }
         }
@@ -206,19 +213,19 @@ fn extract_sequence_tracks(
 fn extract_direct_tracks(
     tables: &AcbTables,
     name_map: &HashMap<i32, String>,
-    ref_index: usize,
+    cue_index: i32,
     tl: &mut TrackList,
     seen: &mut HashSet<String>,
 ) {
     for idx in 0..tables.tras.rows.len() {
-        extract_track_from_track_row(tables, name_map, ref_index as i32, idx, tl, seen);
+        extract_track_from_track_row(tables, name_map, cue_index, idx, tl, seen);
     }
 }
 
 fn extract_track_from_track_row(
     tables: &AcbTables,
     name_map: &HashMap<i32, String>,
-    ref_index: i32,
+    cue_index: i32,
     track_idx: usize,
     tl: &mut TrackList,
     seen: &mut HashSet<String>,
@@ -235,7 +242,7 @@ fn extract_track_from_track_row(
         tables.syns.as_ref(),
         tables.wavs.as_ref(),
         name_map,
-        ref_index,
+        cue_index,
         seen,
     );
 
@@ -247,7 +254,7 @@ fn extract_tracks_from_event(
     syns: Option<&UtfTable>,
     wavs: Option<&UtfTable>,
     name_map: &HashMap<i32, String>,
-    ref_index: i32,
+    cue_index: i32,
     seen: &mut HashSet<String>,
 ) -> Vec<Track> {
     let mut tracks = Vec::new();
@@ -280,7 +287,7 @@ fn extract_tracks_from_event(
 
         if cmd == 0x07d0 {
             if let Some(track) =
-                extract_track_from_command(param_bytes, syns, wavs, name_map, ref_index, seen)
+                extract_track_from_command(param_bytes, syns, wavs, name_map, cue_index, seen)
             {
                 tracks.push(track);
             }
@@ -295,7 +302,7 @@ fn extract_track_from_command(
     syns: Option<&UtfTable>,
     wavs: Option<&UtfTable>,
     name_map: &HashMap<i32, String>,
-    ref_index: i32,
+    cue_index: i32,
     seen: &mut HashSet<String>,
 ) -> Option<Track> {
     if param_bytes.len() < 4 {
@@ -346,11 +353,11 @@ fn extract_track_from_command(
         -1
     };
 
-    let base_name = name_map.get(&ref_index).cloned().unwrap_or_default();
-    let name = generate_unique_name(&base_name, ref_index, wav_id, seen);
+    let base_name = name_map.get(&cue_index).cloned().unwrap_or_default();
+    let name = generate_unique_name(&base_name, cue_index, wav_id, seen);
 
     Some(Track {
-        cue_id: ref_index,
+        cue_id: cue_index,
         name,
         wav_id,
         enc_type,

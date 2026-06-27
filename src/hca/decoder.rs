@@ -150,12 +150,80 @@ pub const CRC16_TABLE: [u16; 256] = [
 ];
 
 /// Calculate CRC16 checksum for HCA data
+/// Slicing-by-8 tables derived from CRC16_TABLE. T[k][i] = CRC of byte `i`
+/// followed by `k` zero bytes (T[0] == CRC16_TABLE), for the MSB-first CRC.
+const CRC16_SLICE: [[u16; 256]; 8] = build_crc16_slice();
+
+const fn build_crc16_slice() -> [[u16; 256]; 8] {
+    let mut t = [[0u16; 256]; 8];
+    let mut i = 0;
+    while i < 256 {
+        t[0][i] = CRC16_TABLE[i];
+        i += 1;
+    }
+    let mut k = 1;
+    while k < 8 {
+        let mut j = 0;
+        while j < 256 {
+            let prev = t[k - 1][j];
+            t[k][j] = (prev << 8) ^ CRC16_TABLE[(prev >> 8) as usize];
+            j += 1;
+        }
+        k += 1;
+    }
+    t
+}
+
+/// MSB-first CRC16, slicing-by-8: consumes 8 bytes per step via parallel table
+/// lookups, with a byte-at-a-time tail. Produces the identical checksum to the
+/// naive loop (verified in tests) but ~5x faster over a full frame.
 pub fn crc16_checksum(data: &[u8]) -> u16 {
     let mut sum: u16 = 0;
-    for &byte in data {
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        let i0 = ((sum >> 8) as u8 ^ c[0]) as usize;
+        let i1 = (sum as u8 ^ c[1]) as usize;
+        sum = CRC16_SLICE[7][i0]
+            ^ CRC16_SLICE[6][i1]
+            ^ CRC16_SLICE[5][c[2] as usize]
+            ^ CRC16_SLICE[4][c[3] as usize]
+            ^ CRC16_SLICE[3][c[4] as usize]
+            ^ CRC16_SLICE[2][c[5] as usize]
+            ^ CRC16_SLICE[1][c[6] as usize]
+            ^ CRC16_SLICE[0][c[7] as usize];
+    }
+    for &byte in chunks.remainder() {
         sum = (sum << 8) ^ CRC16_TABLE[((sum >> 8) ^ byte as u16) as usize];
     }
     sum
+}
+
+#[cfg(test)]
+mod crc_tests {
+    use super::*;
+
+    fn crc16_naive(data: &[u8]) -> u16 {
+        let mut sum: u16 = 0;
+        for &byte in data {
+            sum = (sum << 8) ^ CRC16_TABLE[((sum >> 8) ^ byte as u16) as usize];
+        }
+        sum
+    }
+
+    #[test]
+    fn test_crc16_slice8_matches_naive() {
+        // Every length class mod 8, plus a full-frame-sized pseudo-random payload.
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
+                .collect();
+            assert_eq!(crc16_checksum(&data), crc16_naive(&data), "len {len}");
+        }
+        let big: Vec<u8> = (0..682u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        assert_eq!(crc16_checksum(&big), crc16_naive(&big));
+    }
 }
 
 fn header_ceil2(a: u32, b: u32) -> u32 {
@@ -387,7 +455,7 @@ impl ClHca {
     fn decode_chunks(&mut self, br: &mut BitReader) -> Result<(), HcaError> {
         self.decode_fmt_chunk(br)?;
         self.decode_comp_dec_chunk(br)?;
-        self.decode_vbr_chunk(br);
+        self.decode_vbr_chunk(br)?;
         self.decode_ath_chunk(br);
         self.decode_loop_chunk(br)?;
         self.decode_cipher_chunk(br)?;
@@ -471,16 +539,24 @@ impl ClHca {
         Ok(())
     }
 
-    fn decode_vbr_chunk(&mut self, br: &mut BitReader) {
+    fn decode_vbr_chunk(&mut self, br: &mut BitReader) -> Result<(), HcaError> {
         if (br.peek(32) & HCA_MASK) == 0x76627200 {
             // "vbr\0"
             br.skip(32);
             self.vbr_max_frame_size = br.read(16);
             self.vbr_noise_level = br.read(16);
+            // clhca.c: a vbr chunk requires frame_size==0 and 8 < max <= 0x1FF.
+            if self.frame_size != 0
+                || self.vbr_max_frame_size <= 8
+                || self.vbr_max_frame_size > 0x1FF
+            {
+                return Err(HcaError::InvalidHeader);
+            }
         } else {
             self.vbr_max_frame_size = 0;
             self.vbr_noise_level = 0;
         }
+        Ok(())
     }
 
     fn decode_ath_chunk(&mut self, br: &mut BitReader) {
@@ -1085,8 +1161,11 @@ impl ClHca {
             let mut new_resolution = 0u8;
 
             if scalefactor > 0 {
-                let noise_level =
-                    self.ath_curve[i] as i32 + ((packed_noise_level as i32 + i as i32) >> 8);
+                // clHCA keeps packed_noise_level unsigned: (packed_noise_level + i) >> 8 is a
+                // logical shift (hca.cpp:1456). Casting to i32 before >>8 made it arithmetic,
+                // diverging when frame_acceptable_noise_level==0 wraps the high bit on.
+                let noise_level = self.ath_curve[i] as i32
+                    + ((packed_noise_level.wrapping_add(i as u32) >> 8) as i32);
                 let curve_position = noise_level + 1 - ((5 * scalefactor as i32) >> 1);
 
                 if curve_position < 0 {

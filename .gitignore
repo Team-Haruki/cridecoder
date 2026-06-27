@@ -30,3 +30,10 @@ test_output_usm/
 *.hca
 *.wav
 *.m2v
+
+# OS / editor / local benchmarking
+.DS_Store
+.idea/
+bench/
+__pycache__/
+*.pyc

@@ -86,7 +86,13 @@ impl<R: Read + Seek> AfsArchive<R> {
         let mut files = Vec::with_capacity(file_count as usize);
         for i in 0..file_count as usize {
             let aligned_offset = align(alignment, offsets[i]);
-            let next_offset = offsets[i + 1];
+            // Align the next boundary too (except the final archive end), matching
+            // vgmstream awb.c so a subfile's size spans up to the next aligned start.
+            let next_offset = if i + 1 < file_count as usize {
+                align(alignment, offsets[i + 1])
+            } else {
+                offsets[i + 1]
+            };
             let size = next_offset - aligned_offset;
 
             files.push(AfsFileEntry {

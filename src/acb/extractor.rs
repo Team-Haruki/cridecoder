@@ -14,6 +14,10 @@ pub struct ExtractedAcbTrack {
     pub name: String,
     pub extension: String,
     pub data: Vec<u8>,
+    /// AFS2 subkey of the AWB this waveform came from. Required (together with the
+    /// global keycode) to decrypt type-56 encrypted HCA via
+    /// `HcaDecoder::set_encryption_key`. 0 when the AWB is unencrypted.
+    pub subkey: u16,
 }
 
 #[derive(Error, Debug)]
@@ -63,7 +67,7 @@ pub fn extract_acb_to_memory<R: Read + Seek>(
 
     let mut outputs = Vec::new();
     for track in &track_list.tracks {
-        let data = match get_track_data(track, &mut embedded_awb, &mut external_awbs)? {
+        let (data, subkey) = match get_track_data(track, &mut embedded_awb, &mut external_awbs)? {
             Some(data) => data,
             None => continue,
         };
@@ -77,6 +81,7 @@ pub fn extract_acb_to_memory<R: Read + Seek>(
             name: track.name.clone(),
             extension,
             data,
+            subkey,
         });
     }
 
@@ -174,7 +179,7 @@ fn extract_single_track(
     let output_path = target_dir.join(&filename);
 
     let data = get_track_data(track, embedded_awb, external_awbs)?;
-    let data = match data {
+    let (data, _subkey) = match data {
         Some(d) => d,
         None => return Ok(None),
     };
@@ -183,20 +188,22 @@ fn extract_single_track(
     Ok(Some(output_path.to_string_lossy().into_owned()))
 }
 
+/// Returns the raw waveform bytes plus the originating AWB's AFS2 subkey (for
+/// type-56 HCA decryption; 0 if the AWB is unencrypted).
 fn get_track_data(
     track: &Track,
     embedded_awb: &mut Option<AfsArchive<Cursor<Vec<u8>>>>,
     external_awbs: &mut [AfsArchive<Cursor<Vec<u8>>>],
-) -> Result<Option<Vec<u8>>, ExtractError> {
+) -> Result<Option<(Vec<u8>, u16)>, ExtractError> {
     if track.is_stream {
         if track.stream_awb_id >= 0 && (track.stream_awb_id as usize) < external_awbs.len() {
             let awb = &mut external_awbs[track.stream_awb_id as usize];
             let data = awb.file_data_for_cue_id(track.wav_id)?;
-            return Ok(Some(data));
+            return Ok(Some((data, awb.subkey)));
         }
     } else if let Some(awb) = embedded_awb.as_mut() {
         let data = awb.file_data_for_cue_id(track.wav_id)?;
-        return Ok(Some(data));
+        return Ok(Some((data, awb.subkey)));
     }
 
     Ok(None)

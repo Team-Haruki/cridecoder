@@ -3,6 +3,14 @@
 use super::decoder::{StChannel, HCA_SAMPLES_PER_SUBFRAME};
 use super::tables::IMDCT_WINDOW;
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
+// x86_64 guarantees SSE2 in its baseline, so these are usable without a
+// target_feature gate and run on every x86_64 CI target (Linux/macOS/Windows).
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 const HALF: usize = HCA_SAMPLES_PER_SUBFRAME / 2;
 
 const fn table_from_bits(hex: [[u32; 64]; 7]) -> [[f32; 64]; 7] {
@@ -195,28 +203,57 @@ static COS_TABLES: [[f32; 64]; 7] = table_from_bits([
     ],
 ]);
 
-/// Apply IMDCT transform to dequantized spectra
+/// Apply IMDCT transform to dequantized spectra.
+///
+/// On x86_64 the AVX2-vs-SSE2 choice is made ONCE here (whole-transform
+/// multiversioning) so the per-stage SIMD helpers fully inline into one
+/// function — per-stage runtime dispatch would force non-inlinable
+/// `#[target_feature]` calls and lose the win. Other arches ignore AVX2 and
+/// use NEON/scalar via the stage dispatch.
 pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe { imdct_transform_avx2(ch, subframe) }
+        } else {
+            imdct_body::<false>(ch, subframe)
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    imdct_body::<false>(ch, subframe);
+}
+
+// AVX2 whole-transform entry: target_feature so imdct_body<true> and its AVX2
+// stage helpers all inline into this single function. Reached only after the
+// runtime is_x86_feature_detected!("avx2") check above.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn imdct_transform_avx2(ch: &mut StChannel, subframe: usize) {
+    imdct_body::<true>(ch, subframe);
+}
+
+#[inline(always)]
+fn imdct_body<const AVX2: bool>(ch: &mut StChannel, subframe: usize) {
     // The IMDCT operates on fixed 128-sample buffers. The stage schedule below
     // only indexes within those arrays.
     let spectra = ch.spectra[subframe].as_mut_ptr();
     let temp = ch.temp.as_mut_ptr();
 
-    butterfly_stage::<1, 64, false>(spectra, temp);
-    butterfly_stage::<2, 32, true>(spectra, temp);
-    butterfly_stage::<4, 16, false>(spectra, temp);
-    butterfly_stage::<8, 8, true>(spectra, temp);
-    butterfly_stage::<16, 4, false>(spectra, temp);
-    butterfly_stage::<32, 2, true>(spectra, temp);
-    butterfly_stage::<64, 1, false>(spectra, temp);
+    butterfly_stage::<1, 64, false, AVX2>(spectra, temp);
+    butterfly_stage::<2, 32, true, AVX2>(spectra, temp);
+    butterfly_stage::<4, 16, false, AVX2>(spectra, temp);
+    butterfly_stage::<8, 8, true, AVX2>(spectra, temp);
+    butterfly_stage::<16, 4, false, AVX2>(spectra, temp);
+    butterfly_stage::<32, 2, true, AVX2>(spectra, temp);
+    butterfly_stage::<64, 1, false, AVX2>(spectra, temp);
 
-    dct_stage::<0, 64, 1, true>(spectra, temp);
-    dct_stage::<1, 32, 2, false>(spectra, temp);
-    dct_stage::<2, 16, 4, true>(spectra, temp);
-    dct_stage::<3, 8, 8, false>(spectra, temp);
-    dct_stage::<4, 4, 16, true>(spectra, temp);
-    dct_stage::<5, 2, 32, false>(spectra, temp);
-    dct_stage::<6, 1, 64, true>(spectra, temp);
+    dct_stage::<0, 64, 1, true, AVX2>(spectra, temp);
+    dct_stage::<1, 32, 2, false, AVX2>(spectra, temp);
+    dct_stage::<2, 16, 4, true, AVX2>(spectra, temp);
+    dct_stage::<3, 8, 8, false, AVX2>(spectra, temp);
+    dct_stage::<4, 4, 16, true, AVX2>(spectra, temp);
+    dct_stage::<5, 2, 32, false, AVX2>(spectra, temp);
+    dct_stage::<6, 1, 64, true, AVX2>(spectra, temp);
 
     // Update output/IMDCT with overlapped window
     let wave = ch.wave[subframe].as_mut_ptr();
@@ -236,115 +273,340 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
 }
 
 #[inline(always)]
-fn butterfly_stage<const COUNT1: usize, const COUNT2: usize, const TEMP_SRC: bool>(
+fn butterfly_stage<
+    const COUNT1: usize,
+    const COUNT2: usize,
+    const TEMP_SRC: bool,
+    const AVX2: bool,
+>(
     spectra: *mut f32,
     temp: *mut f32,
 ) {
+    // TEMP_SRC: read temp, write spectra; else read spectra, write temp.
+    let (src, dst): (*const f32, *mut f32) = if TEMP_SRC {
+        (temp, spectra)
+    } else {
+        (spectra, temp)
+    };
+
+    #[cfg(target_arch = "aarch64")]
+    if COUNT2 >= 4 {
+        unsafe { butterfly_neon::<COUNT1, COUNT2>(src, dst) };
+        return;
+    }
+
+    // AVX2 vs SSE2 chosen at compile time via the AVX2 const (set once by the
+    // whole-transform dispatcher), so the chosen helper inlines.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if AVX2 && COUNT2 >= 8 {
+            unsafe { butterfly_avx2::<COUNT1, COUNT2>(src, dst) };
+            return;
+        }
+        if COUNT2 >= 4 {
+            unsafe { butterfly_sse::<COUNT1, COUNT2>(src, dst) };
+            return;
+        }
+    }
+
+    // Scalar fallback (COUNT2 < 4, or no SIMD path). Bit-identical to the SIMD path.
     let mut d1_idx = 0usize;
     let mut d2_idx = COUNT2;
     let mut t1_idx = 0usize;
-
-    if TEMP_SRC {
-        for _ in 0..COUNT1 {
-            for _ in 0..COUNT2 {
-                unsafe {
-                    let a = *temp.add(t1_idx);
-                    let b = *temp.add(t1_idx + 1);
-                    t1_idx += 2;
-
-                    *spectra.add(d1_idx) = a + b;
-                    *spectra.add(d2_idx) = a - b;
-                }
-                d1_idx += 1;
-                d2_idx += 1;
+    for _ in 0..COUNT1 {
+        for _ in 0..COUNT2 {
+            unsafe {
+                let a = *src.add(t1_idx);
+                let b = *src.add(t1_idx + 1);
+                t1_idx += 2;
+                *dst.add(d1_idx) = a + b;
+                *dst.add(d2_idx) = a - b;
             }
-            d1_idx += COUNT2;
-            d2_idx += COUNT2;
+            d1_idx += 1;
+            d2_idx += 1;
         }
-    } else {
-        for _ in 0..COUNT1 {
-            for _ in 0..COUNT2 {
-                unsafe {
-                    let a = *spectra.add(t1_idx);
-                    let b = *spectra.add(t1_idx + 1);
-                    t1_idx += 2;
+        d1_idx += COUNT2;
+        d2_idx += COUNT2;
+    }
+}
 
-                    *temp.add(d1_idx) = a + b;
-                    *temp.add(d2_idx) = a - b;
-                }
-                d1_idx += 1;
-                d2_idx += 1;
-            }
-            d1_idx += COUNT2;
-            d2_idx += COUNT2;
+// NEON butterfly: deinterleave a/b pairs (vld2q), write a+b ascending and a-b
+// ascending. COUNT2 is always a multiple of 4 here. Bit-identical to scalar
+// (same IEEE add/sub, no FMA).
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn butterfly_neon<const COUNT1: usize, const COUNT2: usize>(src: *const f32, dst: *mut f32) {
+    let mut d1 = 0usize;
+    let mut d2 = COUNT2;
+    let mut t = 0usize;
+    for _ in 0..COUNT1 {
+        let mut k = 0;
+        while k + 4 <= COUNT2 {
+            let ab = vld2q_f32(src.add(t)); // ab.0 = a[4], ab.1 = b[4]
+            vst1q_f32(dst.add(d1), vaddq_f32(ab.0, ab.1));
+            vst1q_f32(dst.add(d2), vsubq_f32(ab.0, ab.1));
+            t += 8;
+            d1 += 4;
+            d2 += 4;
+            k += 4;
         }
+        d1 += COUNT2;
+        d2 += COUNT2;
+    }
+}
+
+// SSE2 butterfly (x86_64 baseline), 4-wide. Deinterleave a/b pairs via
+// _mm_shuffle_ps, write a+b and a-b. Bit-identical to scalar (IEEE add/sub, no FMA).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn butterfly_sse<const COUNT1: usize, const COUNT2: usize>(src: *const f32, dst: *mut f32) {
+    let mut d1 = 0usize;
+    let mut d2 = COUNT2;
+    let mut t = 0usize;
+    for _ in 0..COUNT1 {
+        let mut k = 0;
+        while k + 4 <= COUNT2 {
+            let v0 = _mm_loadu_ps(src.add(t)); // [a0,b0,a1,b1]
+            let v1 = _mm_loadu_ps(src.add(t + 4)); // [a2,b2,a3,b3]
+            let a = _mm_shuffle_ps::<0x88>(v0, v1); // [a0,a1,a2,a3]
+            let b = _mm_shuffle_ps::<0xDD>(v0, v1); // [b0,b1,b2,b3]
+            _mm_storeu_ps(dst.add(d1), _mm_add_ps(a, b));
+            _mm_storeu_ps(dst.add(d2), _mm_sub_ps(a, b));
+            t += 8;
+            d1 += 4;
+            d2 += 4;
+            k += 4;
+        }
+        d1 += COUNT2;
+        d2 += COUNT2;
+    }
+}
+
+// AVX2 butterfly (8-wide). Per-lane shuffle leaves [a0,a1,a4,a5,a2,a3,a6,a7];
+// a cross-lane permutevar8x32 restores contiguous order, then a+b / a-b.
+// COUNT2>=8. Bit-identical to scalar (IEEE add/sub, no FMA).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn butterfly_avx2<const COUNT1: usize, const COUNT2: usize>(src: *const f32, dst: *mut f32) {
+    let deint = _mm256_set_epi32(7, 6, 3, 2, 5, 4, 1, 0);
+    let mut d1 = 0usize;
+    let mut d2 = COUNT2;
+    let mut t = 0usize;
+    for _ in 0..COUNT1 {
+        let mut k = 0;
+        while k + 8 <= COUNT2 {
+            let v0 = _mm256_loadu_ps(src.add(t));
+            let v1 = _mm256_loadu_ps(src.add(t + 8));
+            let a = _mm256_permutevar8x32_ps(_mm256_shuffle_ps::<0x88>(v0, v1), deint);
+            let b = _mm256_permutevar8x32_ps(_mm256_shuffle_ps::<0xDD>(v0, v1), deint);
+            _mm256_storeu_ps(dst.add(d1), _mm256_add_ps(a, b));
+            _mm256_storeu_ps(dst.add(d2), _mm256_sub_ps(a, b));
+            t += 16;
+            d1 += 8;
+            d2 += 8;
+            k += 8;
+        }
+        d1 += COUNT2;
+        d2 += COUNT2;
     }
 }
 
 #[inline(always)]
-fn dct_stage<const TABLE: usize, const COUNT1: usize, const COUNT2: usize, const TEMP_SRC: bool>(
+fn dct_stage<
+    const TABLE: usize,
+    const COUNT1: usize,
+    const COUNT2: usize,
+    const TEMP_SRC: bool,
+    const AVX2: bool,
+>(
     spectra: *mut f32,
     temp: *mut f32,
 ) {
+    let (src, dst): (*const f32, *mut f32) = if TEMP_SRC {
+        (temp, spectra)
+    } else {
+        (spectra, temp)
+    };
     let sin_table = &SIN_TABLES[TABLE];
     let cos_table = &COS_TABLES[TABLE];
+
+    #[cfg(target_arch = "aarch64")]
+    if COUNT2 >= 4 {
+        unsafe { dct_neon::<COUNT1, COUNT2>(src, dst, sin_table.as_ptr(), cos_table.as_ptr()) };
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if AVX2 && COUNT2 >= 8 {
+            unsafe { dct_avx2::<COUNT1, COUNT2>(src, dst, sin_table.as_ptr(), cos_table.as_ptr()) };
+            return;
+        }
+        if COUNT2 >= 4 {
+            unsafe { dct_sse::<COUNT1, COUNT2>(src, dst, sin_table.as_ptr(), cos_table.as_ptr()) };
+            return;
+        }
+    }
+
+    // Scalar fallback (COUNT2 < 4, or no SIMD path). Bit-identical to the SIMD path.
     let mut sin_idx = 0;
     let mut cos_idx = 0;
-
     let mut d1_idx = 0usize;
     let mut d2_idx = COUNT2 * 2 - 1;
     let mut s1_idx = 0usize;
     let mut s2_idx = COUNT2;
-
-    if TEMP_SRC {
-        for _ in 0..COUNT1 {
-            for _ in 0..COUNT2 {
-                unsafe {
-                    let a = *temp.add(s1_idx);
-                    let b = *temp.add(s2_idx);
-                    s1_idx += 1;
-                    s2_idx += 1;
-
-                    let sin = sin_table[sin_idx];
-                    let cos = cos_table[cos_idx];
-                    sin_idx += 1;
-                    cos_idx += 1;
-
-                    *spectra.add(d1_idx) = a * sin - b * cos;
-                    *spectra.add(d2_idx) = a * cos + b * sin;
-                }
-                d1_idx += 1;
-                d2_idx -= 1;
+    for _ in 0..COUNT1 {
+        for _ in 0..COUNT2 {
+            unsafe {
+                let a = *src.add(s1_idx);
+                let b = *src.add(s2_idx);
+                s1_idx += 1;
+                s2_idx += 1;
+                let sin = sin_table[sin_idx];
+                let cos = cos_table[cos_idx];
+                sin_idx += 1;
+                cos_idx += 1;
+                *dst.add(d1_idx) = a * sin - b * cos;
+                *dst.add(d2_idx) = a * cos + b * sin;
             }
-            s1_idx += COUNT2;
-            s2_idx += COUNT2;
-            d1_idx += COUNT2;
-            d2_idx += COUNT2 * 3;
+            d1_idx += 1;
+            d2_idx -= 1;
         }
-    } else {
-        for _ in 0..COUNT1 {
-            for _ in 0..COUNT2 {
-                unsafe {
-                    let a = *spectra.add(s1_idx);
-                    let b = *spectra.add(s2_idx);
-                    s1_idx += 1;
-                    s2_idx += 1;
+        s1_idx += COUNT2;
+        s2_idx += COUNT2;
+        d1_idx += COUNT2;
+        d2_idx += COUNT2 * 3;
+    }
+}
 
-                    let sin = sin_table[sin_idx];
-                    let cos = cos_table[cos_idx];
-                    sin_idx += 1;
-                    cos_idx += 1;
-
-                    *temp.add(d1_idx) = a * sin - b * cos;
-                    *temp.add(d2_idx) = a * cos + b * sin;
-                }
-                d1_idx += 1;
-                d2_idx -= 1;
-            }
-            s1_idx += COUNT2;
-            s2_idx += COUNT2;
-            d1_idx += COUNT2;
-            d2_idx += COUNT2 * 3;
+// NEON DCT-IV butterfly. d1 ascending = a*sin - b*cos; d2 descends (d2, d2-1,
+// d2-2, d2-3) = a*cos + b*sin, so compute the vector, lane-reverse it, and store
+// at the block's low end (d2-3). COUNT2 is a multiple of 4 here. Uses
+// vmulq + vsubq/vaddq (no FMA) to stay bit-identical to the scalar path.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn dct_neon<const COUNT1: usize, const COUNT2: usize>(
+    src: *const f32,
+    dst: *mut f32,
+    sin_table: *const f32,
+    cos_table: *const f32,
+) {
+    let mut tbl = 0usize;
+    let mut d1 = 0usize;
+    let mut d2 = COUNT2 * 2 - 1;
+    let mut s1 = 0usize;
+    let mut s2 = COUNT2;
+    for _ in 0..COUNT1 {
+        let mut k = 0;
+        while k + 4 <= COUNT2 {
+            let a = vld1q_f32(src.add(s1));
+            let b = vld1q_f32(src.add(s2));
+            let sin = vld1q_f32(sin_table.add(tbl));
+            let cos = vld1q_f32(cos_table.add(tbl));
+            vst1q_f32(dst.add(d1), vsubq_f32(vmulq_f32(a, sin), vmulq_f32(b, cos)));
+            let d2v = vaddq_f32(vmulq_f32(a, cos), vmulq_f32(b, sin));
+            let rev = vextq_f32::<2>(vrev64q_f32(d2v), vrev64q_f32(d2v));
+            vst1q_f32(dst.add(d2 - 3), rev);
+            s1 += 4;
+            s2 += 4;
+            tbl += 4;
+            d1 += 4;
+            d2 -= 4;
+            k += 4;
         }
+        s1 += COUNT2;
+        s2 += COUNT2;
+        d1 += COUNT2;
+        d2 += COUNT2 * 3;
+    }
+}
+
+// SSE2 DCT-IV butterfly (x86_64 baseline). d1 ascending = a*sin - b*cos; d2
+// descends, so compute a*cos + b*sin, reverse the 4 lanes (_mm_shuffle_ps 0x1B),
+// and store at the block's low end (d2-3). Bit-identical to scalar (no FMA).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn dct_sse<const COUNT1: usize, const COUNT2: usize>(
+    src: *const f32,
+    dst: *mut f32,
+    sin_table: *const f32,
+    cos_table: *const f32,
+) {
+    let mut tbl = 0usize;
+    let mut d1 = 0usize;
+    let mut d2 = COUNT2 * 2 - 1;
+    let mut s1 = 0usize;
+    let mut s2 = COUNT2;
+    for _ in 0..COUNT1 {
+        let mut k = 0;
+        while k + 4 <= COUNT2 {
+            let a = _mm_loadu_ps(src.add(s1));
+            let b = _mm_loadu_ps(src.add(s2));
+            let sin = _mm_loadu_ps(sin_table.add(tbl));
+            let cos = _mm_loadu_ps(cos_table.add(tbl));
+            _mm_storeu_ps(
+                dst.add(d1),
+                _mm_sub_ps(_mm_mul_ps(a, sin), _mm_mul_ps(b, cos)),
+            );
+            let d2v = _mm_add_ps(_mm_mul_ps(a, cos), _mm_mul_ps(b, sin));
+            let rev = _mm_shuffle_ps::<0x1B>(d2v, d2v); // [v3,v2,v1,v0]
+            _mm_storeu_ps(dst.add(d2 - 3), rev);
+            s1 += 4;
+            s2 += 4;
+            tbl += 4;
+            d1 += 4;
+            d2 -= 4;
+            k += 4;
+        }
+        s1 += COUNT2;
+        s2 += COUNT2;
+        d1 += COUNT2;
+        d2 += COUNT2 * 3;
+    }
+}
+
+// AVX2 DCT-IV butterfly (8-wide). d1 = a*sin - b*cos ascending; d2 = a*cos +
+// b*sin reversed across all 8 lanes (permutevar8x32) and stored at d2-7.
+// COUNT2>=8. No FMA -> bit-identical to scalar.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn dct_avx2<const COUNT1: usize, const COUNT2: usize>(
+    src: *const f32,
+    dst: *mut f32,
+    sin_table: *const f32,
+    cos_table: *const f32,
+) {
+    let rev = _mm256_set_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    let mut tbl = 0usize;
+    let mut d1 = 0usize;
+    let mut d2 = COUNT2 * 2 - 1;
+    let mut s1 = 0usize;
+    let mut s2 = COUNT2;
+    for _ in 0..COUNT1 {
+        let mut k = 0;
+        while k + 8 <= COUNT2 {
+            let a = _mm256_loadu_ps(src.add(s1));
+            let b = _mm256_loadu_ps(src.add(s2));
+            let sin = _mm256_loadu_ps(sin_table.add(tbl));
+            let cos = _mm256_loadu_ps(cos_table.add(tbl));
+            _mm256_storeu_ps(
+                dst.add(d1),
+                _mm256_sub_ps(_mm256_mul_ps(a, sin), _mm256_mul_ps(b, cos)),
+            );
+            let d2v = _mm256_add_ps(_mm256_mul_ps(a, cos), _mm256_mul_ps(b, sin));
+            _mm256_storeu_ps(dst.add(d2 - 7), _mm256_permutevar8x32_ps(d2v, rev));
+            s1 += 8;
+            s2 += 8;
+            tbl += 8;
+            d1 += 8;
+            d2 -= 8;
+            k += 8;
+        }
+        s1 += COUNT2;
+        s2 += COUNT2;
+        d1 += COUNT2;
+        d2 += COUNT2 * 3;
     }
 }
