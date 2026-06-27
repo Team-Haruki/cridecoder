@@ -596,6 +596,36 @@ fn test_acb_extract_tracks_metadata() {
     assert_eq!(&data[0..4], b"HCA\x00");
 }
 
+/// Test extract_acb_to_memory returns track bytes with cue id and subkey
+#[test]
+fn test_acb_extract_to_memory() {
+    use cridecoder::{extract_acb_to_memory, AcbBuilder, TrackInput};
+    use std::io::Cursor;
+
+    let mut builder = AcbBuilder::new();
+    builder.add_track(TrackInput::new("mem_a", 0, create_minimal_hca_header()));
+    builder.add_track(TrackInput::new("mem_b", 1, create_minimal_hca_header()));
+
+    let mut output = Vec::new();
+    builder
+        .build(&mut Cursor::new(&mut output), None)
+        .expect("ACB build should succeed");
+
+    let tracks =
+        extract_acb_to_memory(Cursor::new(output), None).expect("in-memory extract should succeed");
+
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(tracks[0].name, "mem_a");
+    assert_eq!(tracks[0].cue_id, 0);
+    assert_eq!(tracks[1].name, "mem_b");
+    assert_eq!(tracks[1].cue_id, 1);
+    for track in &tracks {
+        assert_eq!(track.extension, "hca");
+        assert_eq!(track.subkey, 0); // builder produces unencrypted AWBs
+        assert_eq!(&track.data[0..4], b"HCA\x00");
+    }
+}
+
 /// Test ACB builder keeps Waveform AWB ids aligned with non-zero cue ids
 #[test]
 fn test_acb_builder_nonzero_cue_id() {

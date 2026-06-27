@@ -101,35 +101,76 @@ fn decode_acb_to_wav(acb_path: &str, output_dir: &str, key: Option<u64>) -> PyRe
     fs::create_dir_all(out_dir)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create output dir: {}", e)))?;
 
-    let file = fs::File::open(acb_path)
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to open ACB: {}", e)))?;
+    acb::decode_acb_to_wav_from_file(Path::new(acb_path), out_dir, key)
+        .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))
+}
 
-    let tracks = acb::extract_acb_to_memory(file, Some(Path::new(acb_path)))
+/// Extract audio tracks from in-memory ACB bytes (no disk I/O).
+///
+/// The in-memory counterpart of :func:`extract_acb_tracks`: takes the ACB
+/// bytes directly and returns the waveform bytes per track instead of writing
+/// files. Only the embedded AWB is read — external streaming ``.awb`` archives
+/// can't be resolved without a path, so use :func:`extract_acb` for those.
+///
+/// Args:
+///     acb_data: Raw ACB file bytes
+///
+/// Returns:
+///     List of dicts ``{"name", "cue_id", "extension", "subkey", "data"}``.
+#[pyfunction]
+fn extract_acb_bytes<'py>(
+    py: Python<'py>,
+    acb_data: &[u8],
+) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+    let tracks = acb::extract_acb_to_memory(Cursor::new(acb_data.to_vec()), None)
         .map_err(|e| PyRuntimeError::new_err(format!("ACB extraction failed: {}", e)))?;
 
-    let mut outputs = Vec::with_capacity(tracks.len());
+    let mut out = Vec::with_capacity(tracks.len());
     for track in tracks {
-        if track.extension == "hca" {
-            let mut decoder = HcaDecoder::from_reader(Cursor::new(track.data))
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse HCA: {}", e)))?;
-            if let Some(k) = key {
-                decoder.set_encryption_key(k, track.subkey as u64);
-            }
-            let wav_path = out_dir.join(format!("{}.wav", track.name));
-            let mut wav = fs::File::create(&wav_path)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to create WAV: {}", e)))?;
-            decoder
-                .decode_to_wav(&mut wav)
-                .map_err(|e| PyRuntimeError::new_err(format!("HCA decode failed: {}", e)))?;
-            outputs.push(wav_path.to_string_lossy().into_owned());
-        } else {
-            let raw_path = out_dir.join(format!("{}.{}", track.name, track.extension));
-            fs::write(&raw_path, &track.data)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to write track: {}", e)))?;
-            outputs.push(raw_path.to_string_lossy().into_owned());
-        }
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("name", track.name)?;
+        dict.set_item("cue_id", track.cue_id)?;
+        dict.set_item("extension", track.extension)?;
+        dict.set_item("subkey", track.subkey)?;
+        dict.set_item("data", pyo3::types::PyBytes::new(py, &track.data))?;
+        out.push(dict);
     }
-    Ok(outputs)
+    Ok(out)
+}
+
+/// Decode an in-memory ACB straight to WAV bytes (no disk I/O).
+///
+/// The in-memory counterpart of :func:`decode_acb_to_wav`: each AWB's subkey is
+/// applied automatically, so encrypted ACBs only need the global ``key``.
+/// Non-HCA tracks are returned verbatim (``extension`` reflects this).
+///
+/// Args:
+///     acb_data: Raw ACB file bytes
+///     key: Global HCA keycode (omit/None for unencrypted ACBs)
+///
+/// Returns:
+///     List of dicts ``{"name", "cue_id", "extension", "data"}`` where ``data``
+///     is WAV bytes for HCA tracks (``extension == "wav"``).
+#[pyfunction]
+#[pyo3(signature = (acb_data, key=None))]
+fn decode_acb_to_wav_bytes<'py>(
+    py: Python<'py>,
+    acb_data: &[u8],
+    key: Option<u64>,
+) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+    let tracks = acb::decode_acb_to_wav_to_memory(Cursor::new(acb_data.to_vec()), None, key)
+        .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))?;
+
+    let mut out = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("name", track.name)?;
+        dict.set_item("cue_id", track.cue_id)?;
+        dict.set_item("extension", track.extension)?;
+        dict.set_item("data", pyo3::types::PyBytes::new(py, &track.data))?;
+        out.push(dict);
+    }
+    Ok(out)
 }
 
 /// Build an ACB file from track data.
@@ -525,6 +566,42 @@ fn extract_usm(
         .collect())
 }
 
+/// Extract USM streams from in-memory bytes (no disk I/O).
+///
+/// The in-memory counterpart of :func:`extract_usm`: takes the USM bytes and
+/// returns each stream's bytes instead of writing files.
+///
+/// Args:
+///     usm_data: Raw USM file bytes
+///     key: Optional decryption key (u64)
+///     export_audio: Whether to include audio streams (default: false)
+///
+/// Returns:
+///     List of dicts ``{"name", "extension", "data"}`` (video, and audio when
+///     ``export_audio`` is set).
+#[pyfunction]
+#[pyo3(signature = (usm_data, key=None, export_audio=false))]
+fn extract_usm_bytes<'py>(
+    py: Python<'py>,
+    usm_data: &[u8],
+    key: Option<u64>,
+    export_audio: bool,
+) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+    let streams =
+        usm::extract_usm_to_memory(Cursor::new(usm_data.to_vec()), b"", key, export_audio)
+            .map_err(|e| PyRuntimeError::new_err(format!("USM extraction failed: {}", e)))?;
+
+    let mut out = Vec::with_capacity(streams.len());
+    for stream in streams {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("name", stream.name)?;
+        dict.set_item("extension", stream.extension)?;
+        dict.set_item("data", pyo3::types::PyBytes::new(py, &stream.data))?;
+        out.push(dict);
+    }
+    Ok(out)
+}
+
 /// Build a USM file from video data.
 ///
 /// Args:
@@ -611,7 +688,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ACB functions
     m.add_function(wrap_pyfunction!(extract_acb, m)?)?;
     m.add_function(wrap_pyfunction!(extract_acb_tracks, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_acb_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(decode_acb_to_wav, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_acb_to_wav_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(build_music_acb_bytes, m)?)?;
@@ -624,6 +703,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // USM functions
     m.add_function(wrap_pyfunction!(extract_usm, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_usm_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(build_usm, m)?)?;
     m.add_function(wrap_pyfunction!(build_usm_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(read_usm_metadata, m)?)?;
