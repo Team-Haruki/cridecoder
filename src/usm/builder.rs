@@ -461,11 +461,13 @@ impl UsmBuilder {
             let size = result.len() - base;
 
             if size >= 0x200 {
-                // First pass (reverse order for encoding)
+                // First pass: update the mask first, then XOR — the exact inverse
+                // of the decoder's pass-1 order (extractor.rs mask_video), so an
+                // encoded stream round-trips. (Was XOR-then-update; PyCriCodecs usm.py.)
                 let mut mask = vmask[0].clone();
                 for i in 0..0x100 {
-                    result[base + i] ^= mask[i & 0x1F];
                     mask[i & 0x1F] ^= result[0x100 + base + i];
+                    result[base + i] ^= mask[i & 0x1F];
                 }
 
                 // Second pass

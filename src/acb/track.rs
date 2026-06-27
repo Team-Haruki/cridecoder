@@ -158,8 +158,10 @@ fn extract_tracks_from_tables(
 ) -> Result<(), TrackError> {
     for (cue_index, cue_row) in tables.cues.rows.iter().enumerate() {
         let ref_type = get_int_field(cue_row, "ReferenceType") as i32;
+        // vgmstream skips cues with an unhandled ReferenceType rather than failing
+        // the whole ACB (acb.c). We handle 3 (Sequence) and 8 (BlockSequence).
         if ref_type != 3 && ref_type != 8 {
-            return Err(TrackError::UnsupportedRefType(ref_type));
+            continue;
         }
 
         // The cue NAME binds to the cue's row position (CueIndex); ReferenceIndex
