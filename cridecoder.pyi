@@ -11,6 +11,7 @@ __all__ = [
     "extract_acb",
     "extract_acb_tracks",
     "extract_acb_bytes",
+    "extract_acb_unique_bytes",
     "decode_acb_to_wav",
     "decode_acb_to_wav_bytes",
     "build_acb",
@@ -55,6 +56,17 @@ def extract_acb_bytes(acb_data: bytes) -> list[dict[str, object]]:
     list of dicts ``{"name", "cue_id", "extension", "subkey", "data"}`` (``data``
     is ``bytes``). Only the embedded AWB is read — external streaming ``.awb``
     archives need a path, so use :func:`extract_acb` for those.
+    """
+    ...
+
+def extract_acb_unique_bytes(acb_data: bytes) -> list[dict[str, object]]:
+    """Extract each distinct waveform from in-memory ACB bytes exactly once.
+
+    ACBs often point several cues at one physical waveform; unlike
+    :func:`extract_acb_bytes` (which copies it once per cue), this copies each
+    waveform a single time. Returns a list of dicts
+    ``{"extension", "subkey", "data", "cues"}`` where ``data`` is ``bytes`` and
+    ``cues`` is a list of ``{"name", "cue_id"}`` (at least one entry).
     """
     ...
 
