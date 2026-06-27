@@ -569,7 +569,10 @@ fn extract_usm_chunks<R: Read + Seek>(
 
         let contents_end = reader.read_bytes(13)?;
         if &contents_end == b"#CONTENTS END" {
-            break;
+            // Each stream emits its own #CONTENTS END; skip it and keep reading to
+            // EOF. Breaking here truncates the longer stream (PyCriCodecs usm.py).
+            reader.seek(SeekFrom::Start(next_offset))?;
+            continue;
         }
 
         reader.seek(SeekFrom::Current(-13))?;
@@ -617,7 +620,10 @@ fn extract_usm_chunks_to_memory<R: Read + Seek>(
 
         let contents_end = reader.read_bytes(13)?;
         if &contents_end == b"#CONTENTS END" {
-            break;
+            // Each stream emits its own #CONTENTS END; skip it and keep reading to
+            // EOF. Breaking here truncates the longer stream (PyCriCodecs usm.py).
+            reader.seek(SeekFrom::Start(next_offset))?;
+            continue;
         }
 
         reader.seek(SeekFrom::Current(-13))?;
