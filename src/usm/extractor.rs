@@ -318,43 +318,66 @@ fn get_mask(key: u64) -> (VideoMask, AudioMask) {
     ((vmask1, vmask2), amask)
 }
 
-/// Mask video content
-fn mask_video(content: &[u8], vmask: &VideoMask) -> Vec<u8> {
-    let mut result = content.to_vec();
-    let size = result.len().saturating_sub(0x40);
-    let base = 0x40;
+/// De-mask video content **in place**.
+///
+/// The bulk (second) pass is written as a 32-byte (mask-width) chunked XOR so
+/// LLVM auto-vectorizes it to SSE2/NEON/AVX with no platform-specific
+/// intrinsics. The per-lane mask recurrence is preserved exactly: the 32 lanes
+/// are independent, so each 32-byte row does `row ^= mask; mask = row ^ vmask1`
+/// as two vector ops with `mask` carried in a register across rows. The first
+/// pass (256 B, negligible) stays scalar to avoid an aliasing split. Output is
+/// bit-identical to the original scalar version (locked by `mask_golden`).
+fn mask_video(buf: &mut [u8], vmask: &VideoMask) {
+    let len = buf.len();
+    if len.saturating_sub(0x40) < 0x200 {
+        return;
+    }
+    let vm1 = vmask.1;
+    let mut mask = vmask.1;
 
-    if size >= 0x200 {
-        let mut mask = vmask.1;
-
-        // Second pass
-        for i in 0x100..size {
-            result[base + i] ^= mask[i & 0x1F];
-            mask[i & 0x1F] = result[base + i] ^ vmask.1[i & 0x1F];
+    // Second pass: original i in 0x100..size -> buf[0x140..len]. 0x100 is
+    // 32-aligned, so row position j maps to mask lane j.
+    {
+        let mut chunks = buf[0x140..len].chunks_exact_mut(MASK_LEN);
+        for row in &mut chunks {
+            let row: &mut [u8; MASK_LEN] = row.try_into().unwrap();
+            for j in 0..MASK_LEN {
+                row[j] ^= mask[j];
+                mask[j] = row[j] ^ vm1[j];
+            }
         }
-
-        // First pass
-        mask.copy_from_slice(&vmask.0);
-        for i in 0..0x100 {
-            mask[i & 0x1F] ^= result[0x100 + base + i];
-            result[base + i] ^= mask[i & 0x1F];
+        for (j, b) in chunks.into_remainder().iter_mut().enumerate() {
+            *b ^= mask[j];
+            mask[j] = *b ^ vm1[j];
         }
     }
 
-    result
+    // First pass: i in 0..0x100 reads the now-decoded buf[0x140..0x240].
+    let mut mask = vmask.0;
+    for i in 0..0x100 {
+        let v = buf[0x140 + i];
+        let l = i & 0x1F;
+        mask[l] ^= v;
+        buf[0x40 + i] ^= mask[l];
+    }
 }
 
-/// Mask audio content
-fn mask_audio(content: &[u8], amask: &AudioMask) -> Vec<u8> {
-    let mut result = content.to_vec();
-    let size = result.len().saturating_sub(0x140);
-    let base = 0x140;
-
-    for i in 0..size {
-        result[base + i] ^= amask[i & 0x1F];
+/// De-mask audio content **in place** (simple repeating 32-byte XOR). Chunked
+/// to the mask width so LLVM auto-vectorizes. Bit-identical to the original.
+fn mask_audio(buf: &mut [u8], amask: &AudioMask) {
+    let Some(region) = buf.get_mut(0x140..) else {
+        return;
+    };
+    let mut chunks = region.chunks_exact_mut(MASK_LEN);
+    for row in &mut chunks {
+        let row: &mut [u8; MASK_LEN] = row.try_into().unwrap();
+        for j in 0..MASK_LEN {
+            row[j] ^= amask[j];
+        }
     }
-
-    result
+    for (j, b) in chunks.into_remainder().iter_mut().enumerate() {
+        *b ^= amask[j];
+    }
 }
 
 /// Decode Shift-JIS bytes to String
@@ -722,15 +745,17 @@ fn read_usm_chunk_to_vec<R: Read + Seek>(
     vmask: Option<&VideoMask>,
     amask: Option<&AudioMask>,
 ) -> Result<Vec<u8>, UsmError> {
-    let content = reader.read_bytes(read_data_len)?;
+    let mut content = reader.read_bytes(read_data_len)?;
     if data_type != 0 {
         return Ok(content);
     }
     if let Some(vmask) = vmask {
-        return Ok(mask_video(&content, vmask));
+        mask_video(&mut content, vmask);
+        return Ok(content);
     }
     if let Some(amask) = amask {
-        return Ok(mask_audio(&content, amask));
+        mask_audio(&mut content, amask);
+        return Ok(content);
     }
     Ok(content)
 }
@@ -750,8 +775,8 @@ fn process_chunk<R: Read + Seek>(
     if sig == b"@SFV" {
         if data_type == 0 {
             if let Some(vmask) = vmask {
-                let content = reader.read_bytes(read_data_len)?;
-                let content = mask_video(&content, vmask);
+                let mut content = reader.read_bytes(read_data_len)?;
+                mask_video(&mut content, vmask);
                 video_file.write_all(&content)?;
             } else {
                 reader.copy_to_writer(read_data_len as u64, video_file)?;
@@ -763,8 +788,8 @@ fn process_chunk<R: Read + Seek>(
         if let Some(audio_file) = audio_file {
             if data_type == 0 {
                 if let Some(amask) = amask {
-                    let content = reader.read_bytes(read_data_len)?;
-                    let content = mask_audio(&content, amask);
+                    let mut content = reader.read_bytes(read_data_len)?;
+                    mask_audio(&mut content, amask);
                     audio_file.write_all(&content)?;
                 } else {
                     reader.copy_to_writer(read_data_len as u64, audio_file)?;
@@ -825,5 +850,187 @@ mod tests {
         row2.insert("name".to_string(), UtfValue::String(b"x".to_vec()));
         assert_eq!(utf_first_u32(&vec![row2], "name"), None);
         assert_eq!(utf_first_u32(&Vec::new(), "audio_codec"), None);
+    }
+
+    // --- mask de-XOR microbench + golden regression guard ---
+
+    // Arbitrary synthetic mask key — only needs to exercise the de-mask paths;
+    // not tied to any real content.
+    const TEST_KEY: u64 = 0x0011_2233_4455_6677;
+
+    fn lcg_fill(n: usize) -> Vec<u8> {
+        // deterministic pseudo-random payload (content-independent XOR, but
+        // realistic byte distribution; reproducible across runs)
+        let mut v = Vec::with_capacity(n);
+        let mut s: u64 = 0x243f6a8885a308d3;
+        for _ in 0..n {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            v.push((s >> 33) as u8);
+        }
+        v
+    }
+
+    fn fnv(data: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in data {
+            h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    // Original scalar algorithm, kept verbatim as the reference oracle.
+    fn ref_video(content: &[u8], vmask: &VideoMask) -> Vec<u8> {
+        let mut result = content.to_vec();
+        let size = result.len().saturating_sub(0x40);
+        let base = 0x40;
+        if size >= 0x200 {
+            let mut mask = vmask.1;
+            for i in 0x100..size {
+                result[base + i] ^= mask[i & 0x1F];
+                mask[i & 0x1F] = result[base + i] ^ vmask.1[i & 0x1F];
+            }
+            mask.copy_from_slice(&vmask.0);
+            for i in 0..0x100 {
+                mask[i & 0x1F] ^= result[0x100 + base + i];
+                result[base + i] ^= mask[i & 0x1F];
+            }
+        }
+        result
+    }
+    fn ref_audio(content: &[u8], amask: &AudioMask) -> Vec<u8> {
+        let mut result = content.to_vec();
+        let size = result.len().saturating_sub(0x140);
+        let base = 0x140;
+        for i in 0..size {
+            result[base + i] ^= amask[i & 0x1F];
+        }
+        result
+    }
+
+    #[test]
+    fn mask_matches_reference() {
+        // Differential test: the vectorized in-place fns must be byte-identical
+        // to the original scalar oracle across boundary sizes (0x40/0x140/0x200
+        // thresholds, 32-byte remainders, tiny/empty buffers).
+        let (vmask, amask) = get_mask(TEST_KEY);
+        let sizes = [
+            0,
+            1,
+            0x3f,
+            0x40,
+            0x41,
+            0x13f,
+            0x140,
+            0x141,
+            0x1ff,
+            0x200,
+            0x23e,
+            0x23f,
+            0x240,
+            0x241,
+            0x25f,
+            0x260,
+            0x261,
+            0x300,
+            1000,
+            4096,
+            4097,
+            0x40 + 0x200,
+            0x40 + 0x201,
+            0x40 + 0x21f,
+            0x40 + 0x220,
+            100_000,
+            100_003,
+        ];
+        for &n in &sizes {
+            let content = lcg_fill(n);
+            let mut v = content.clone();
+            mask_video(&mut v, &vmask);
+            assert_eq!(
+                v,
+                ref_video(&content, &vmask),
+                "mask_video mismatch at size {n}"
+            );
+            let mut a = content.clone();
+            mask_audio(&mut a, &amask);
+            assert_eq!(
+                a,
+                ref_audio(&content, &amask),
+                "mask_audio mismatch at size {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn mask_golden() {
+        // Locks the exact byte output of mask_video/mask_audio so the SIMD/
+        // auto-vectorization refactor stays bit-identical. Uses a synthetic key (TEST_KEY).
+        let (vmask, amask) = get_mask(TEST_KEY);
+        let content = lcg_fill(0x40 + 1_000_000); // > 0x200 so both passes run
+        let mut v = content.clone();
+        mask_video(&mut v, &vmask);
+        let mut a = content.clone();
+        mask_audio(&mut a, &amask);
+        let (cv, ca) = (fnv(&v), fnv(&a));
+        eprintln!("GOLDEN video={:#018x} audio={:#018x}", cv, ca);
+        assert_eq!(cv, 0x01cb2bb02df7f48c, "mask_video output changed");
+        assert_eq!(ca, 0x3b4a709ace2862ed, "mask_audio output changed");
+    }
+
+    #[test]
+    fn bench_mask() {
+        if std::env::var("USM_BENCH").is_err() {
+            return;
+        }
+        let (vmask, amask) = get_mask(TEST_KEY);
+        let n = std::env::var("USM_BENCH_MB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(48);
+        let iters = std::env::var("USM_BENCH_ITERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(50);
+        let content = lcg_fill(0x40 + n * 1024 * 1024);
+        let mb = content.len() as f64 / 1e6;
+        // In-place on owned buffers (no per-iter copy): this is exactly what the
+        // caller now pays, since read_bytes already owns the buffer. Running the
+        // same buffer repeatedly is fine for timing — the XOR work is constant.
+        let mut vbuf = content.clone();
+        let mut abuf = content.clone();
+
+        // warm
+        mask_video(&mut vbuf, &vmask);
+        mask_audio(&mut abuf, &amask);
+        std::hint::black_box((&vbuf, &abuf));
+
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            mask_video(&mut vbuf, &vmask);
+            std::hint::black_box(&vbuf);
+        }
+        let ev = t.elapsed();
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            mask_audio(&mut abuf, &amask);
+            std::hint::black_box(&abuf);
+        }
+        let ea = t.elapsed();
+        eprintln!(
+            "mask_video: {:.3} ms/call, {:.0} MB/s  ({} MB x {} iters)",
+            ev.as_secs_f64() * 1000.0 / iters as f64,
+            mb * iters as f64 / ev.as_secs_f64(),
+            n,
+            iters
+        );
+        eprintln!(
+            "mask_audio: {:.3} ms/call, {:.0} MB/s  ({} MB x {} iters)",
+            ea.as_secs_f64() * 1000.0 / iters as f64,
+            mb * iters as f64 / ea.as_secs_f64(),
+            n,
+            iters
+        );
     }
 }
