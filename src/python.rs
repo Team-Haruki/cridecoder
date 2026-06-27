@@ -138,6 +138,45 @@ fn extract_acb_bytes<'py>(
     Ok(out)
 }
 
+/// Extract each distinct waveform from in-memory ACB bytes exactly once.
+///
+/// ACBs often point several cues at the same physical waveform; unlike
+/// :func:`extract_acb_bytes` (which copies it once per cue), this reads and
+/// copies each waveform a single time and lists the cues that reference it.
+///
+/// Args:
+///     acb_data: Raw ACB file bytes
+///
+/// Returns:
+///     List of dicts ``{"extension", "subkey", "data", "cues"}`` where ``cues``
+///     is a list of ``{"name", "cue_id"}`` (at least one).
+#[pyfunction]
+fn extract_acb_unique_bytes<'py>(
+    py: Python<'py>,
+    acb_data: &[u8],
+) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+    let waveforms = acb::extract_acb_unique_to_memory(Cursor::new(acb_data), None)
+        .map_err(|e| PyRuntimeError::new_err(format!("ACB extraction failed: {}", e)))?;
+
+    let mut out = Vec::with_capacity(waveforms.len());
+    for wf in waveforms {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("extension", wf.extension)?;
+        dict.set_item("subkey", wf.subkey)?;
+        dict.set_item("data", pyo3::types::PyBytes::new(py, &wf.data))?;
+        let mut cues = Vec::with_capacity(wf.cues.len());
+        for cue in wf.cues {
+            let c = pyo3::types::PyDict::new(py);
+            c.set_item("name", cue.name)?;
+            c.set_item("cue_id", cue.cue_id)?;
+            cues.push(c);
+        }
+        dict.set_item("cues", cues)?;
+        out.push(dict);
+    }
+    Ok(out)
+}
+
 /// Decode an in-memory ACB straight to WAV bytes (no disk I/O).
 ///
 /// The in-memory counterpart of :func:`decode_acb_to_wav`: each AWB's subkey is
@@ -688,6 +727,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_acb, m)?)?;
     m.add_function(wrap_pyfunction!(extract_acb_tracks, m)?)?;
     m.add_function(wrap_pyfunction!(extract_acb_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_acb_unique_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(decode_acb_to_wav, m)?)?;
     m.add_function(wrap_pyfunction!(decode_acb_to_wav_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb, m)?)?;

@@ -4,6 +4,7 @@ use crate::acb::afs::AfsArchive;
 use crate::acb::consts::wave_type_extension;
 use crate::acb::track::{Track, TrackList};
 use crate::acb::utf::{get_bytes_field, get_string_field, take_bytes_field, UtfTable};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
@@ -73,22 +74,88 @@ pub fn extract_acb_to_memory<R: Read + Seek>(
             Some(data) => data,
             None => continue,
         };
-        let extension = wave_type_extension(track.enc_type);
-        let extension = if extension.is_empty() {
-            track.enc_type.to_string()
-        } else {
-            extension.trim_start_matches('.').to_string()
-        };
         outputs.push(ExtractedAcbTrack {
             name: track.name.clone(),
             cue_id: track.cue_id,
-            extension,
+            extension: track_extension(track),
             data,
             subkey,
         });
     }
 
     Ok(outputs)
+}
+
+/// A cue that references a waveform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcbCueRef {
+    pub name: String,
+    pub cue_id: i32,
+}
+
+/// A distinct (de-duplicated) waveform from an ACB, with every cue that maps to
+/// it. ACBs frequently point multiple cues at one physical waveform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueWaveform {
+    pub extension: String,
+    /// AFS2 subkey of the originating AWB (0 if unencrypted).
+    pub subkey: u16,
+    pub data: Vec<u8>,
+    /// All cues that reference this waveform (always at least one).
+    pub cues: Vec<AcbCueRef>,
+}
+
+/// Extract each distinct waveform from an ACB exactly once, together with the
+/// cues that reference it. The per-cue extractors read and copy a shared
+/// waveform once per cue; this reads and copies each waveform a single time.
+pub fn extract_acb_unique_to_memory<R: Read + Seek>(
+    acb_file: R,
+    acb_file_path: Option<&Path>,
+) -> Result<Vec<UniqueWaveform>, ExtractError> {
+    let mut utf = UtfTable::new(acb_file)?;
+    let track_list = TrackList::new(&utf)?;
+    let mut embedded_awb = load_embedded_awb(&mut utf.rows[0]);
+    let mut external_awbs = load_external_awbs(&utf.rows[0], acb_file_path);
+
+    // A physical waveform is identified by which AWB it lives in plus its id.
+    let mut seen: HashMap<(bool, i32, i32), usize> = HashMap::new();
+    let mut out: Vec<UniqueWaveform> = Vec::new();
+
+    for track in &track_list.tracks {
+        let key = (track.is_stream, track.stream_awb_id, track.wav_id);
+        let cue = AcbCueRef {
+            name: track.name.clone(),
+            cue_id: track.cue_id,
+        };
+        if let Some(&idx) = seen.get(&key) {
+            out[idx].cues.push(cue);
+            continue;
+        }
+        let (data, subkey) = match get_track_data(track, &mut embedded_awb, &mut external_awbs)? {
+            Some(d) => d,
+            None => continue,
+        };
+        seen.insert(key, out.len());
+        out.push(UniqueWaveform {
+            extension: track_extension(track),
+            subkey,
+            data,
+            cues: vec![cue],
+        });
+    }
+
+    Ok(out)
+}
+
+/// Output extension for a track's waveform (no leading dot; falls back to the
+/// numeric encode type for unknown formats).
+fn track_extension(track: &Track) -> String {
+    let ext = wave_type_extension(track.enc_type);
+    if ext.is_empty() {
+        track.enc_type.to_string()
+    } else {
+        ext.trim_start_matches('.').to_string()
+    }
 }
 
 fn load_embedded_awb(row: &mut crate::acb::utf::ValueMap) -> Option<AfsArchive<Cursor<Vec<u8>>>> {

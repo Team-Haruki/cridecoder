@@ -20,7 +20,8 @@ pub use acb::{
 };
 pub use acb::{
     extract_acb, extract_acb_from_file, extract_acb_to_memory, extract_acb_tracks,
-    extract_acb_tracks_from_file, ExtractedAcbTrack, ExtractedTrackFile,
+    extract_acb_tracks_from_file, extract_acb_unique_to_memory, AcbCueRef, ExtractedAcbTrack,
+    ExtractedTrackFile, UniqueWaveform,
 };
 pub use acb::{AcbBuilder, AfsArchiveBuilder, BuilderError, TrackInput, UtfTableBuilder};
 

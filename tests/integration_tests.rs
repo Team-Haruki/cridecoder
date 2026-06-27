@@ -626,6 +626,36 @@ fn test_acb_extract_to_memory() {
     }
 }
 
+/// Test extract_acb_unique_to_memory de-duplicates waveforms and lists cues
+#[test]
+fn test_acb_extract_unique() {
+    use cridecoder::{extract_acb_unique_to_memory, AcbBuilder, TrackInput};
+    use std::io::Cursor;
+
+    let mut builder = AcbBuilder::new();
+    builder.add_track(TrackInput::new("uniq_a", 0, create_minimal_hca_header()));
+    builder.add_track(TrackInput::new("uniq_b", 1, create_minimal_hca_header()));
+
+    let mut output = Vec::new();
+    builder
+        .build(&mut Cursor::new(&mut output), None)
+        .expect("ACB build should succeed");
+
+    let waves = extract_acb_unique_to_memory(Cursor::new(output), None)
+        .expect("unique extract should work");
+
+    // The builder lays down two distinct waveforms, one cue each.
+    assert_eq!(waves.len(), 2);
+    for wf in &waves {
+        assert_eq!(wf.extension, "hca");
+        assert_eq!(wf.subkey, 0);
+        assert_eq!(wf.cues.len(), 1);
+        assert_eq!(&wf.data[0..4], b"HCA\x00");
+    }
+    assert_eq!(waves[0].cues[0].name, "uniq_a");
+    assert_eq!(waves[1].cues[0].name, "uniq_b");
+}
+
 /// Test ACB builder keeps Waveform AWB ids aligned with non-zero cue ids
 #[test]
 fn test_acb_builder_nonzero_cue_id() {
