@@ -272,7 +272,12 @@ fn imdct_body<const AVX2: bool>(ch: &mut StChannel, subframe: usize) {
 }
 
 #[inline(always)]
-fn butterfly_stage<const COUNT1: usize, const COUNT2: usize, const TEMP_SRC: bool, const AVX2: bool>(
+fn butterfly_stage<
+    const COUNT1: usize,
+    const COUNT2: usize,
+    const TEMP_SRC: bool,
+    const AVX2: bool,
+>(
     spectra: *mut f32,
     temp: *mut f32,
 ) {
@@ -329,10 +334,7 @@ fn butterfly_stage<const COUNT1: usize, const COUNT2: usize, const TEMP_SRC: boo
 // (same IEEE add/sub, no FMA).
 #[cfg(target_arch = "aarch64")]
 #[inline]
-unsafe fn butterfly_neon<const COUNT1: usize, const COUNT2: usize>(
-    src: *const f32,
-    dst: *mut f32,
-) {
+unsafe fn butterfly_neon<const COUNT1: usize, const COUNT2: usize>(src: *const f32, dst: *mut f32) {
     let mut d1 = 0usize;
     let mut d2 = COUNT2;
     let mut t = 0usize;
@@ -356,10 +358,7 @@ unsafe fn butterfly_neon<const COUNT1: usize, const COUNT2: usize>(
 // _mm_shuffle_ps, write a+b and a-b. Bit-identical to scalar (IEEE add/sub, no FMA).
 #[cfg(target_arch = "x86_64")]
 #[inline]
-unsafe fn butterfly_sse<const COUNT1: usize, const COUNT2: usize>(
-    src: *const f32,
-    dst: *mut f32,
-) {
+unsafe fn butterfly_sse<const COUNT1: usize, const COUNT2: usize>(src: *const f32, dst: *mut f32) {
     let mut d1 = 0usize;
     let mut d2 = COUNT2;
     let mut t = 0usize;
@@ -388,10 +387,7 @@ unsafe fn butterfly_sse<const COUNT1: usize, const COUNT2: usize>(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn butterfly_avx2<const COUNT1: usize, const COUNT2: usize>(
-    src: *const f32,
-    dst: *mut f32,
-) {
+unsafe fn butterfly_avx2<const COUNT1: usize, const COUNT2: usize>(src: *const f32, dst: *mut f32) {
     let deint = _mm256_set_epi32(7, 6, 3, 2, 5, 4, 1, 0);
     let mut d1 = 0usize;
     let mut d2 = COUNT2;

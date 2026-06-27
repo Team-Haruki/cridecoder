@@ -174,7 +174,9 @@ impl<R: Read + Seek> HcaDecoder<R> {
         let start_idx = discard as usize * self.info.channel_count as usize;
         let mut num_samples = (samples - discard) as usize;
         // Drop trailing encoder_padding: cap cumulative output at the valid count.
-        let remaining = self.total_valid_samples().saturating_sub(self.samples_written);
+        let remaining = self
+            .total_valid_samples()
+            .saturating_sub(self.samples_written);
         if num_samples as u64 > remaining {
             num_samples = remaining as usize;
         }
@@ -215,7 +217,9 @@ impl<R: Read + Seek> HcaDecoder<R> {
 
         let mut num_samples = (samples - discard) as usize;
         // Drop trailing encoder_padding: cap cumulative output at the valid count.
-        let remaining = self.total_valid_samples().saturating_sub(self.samples_written);
+        let remaining = self
+            .total_valid_samples()
+            .saturating_sub(self.samples_written);
         if num_samples as u64 > remaining {
             num_samples = remaining as usize;
         }
@@ -452,8 +456,8 @@ impl<R: Read + Seek> HcaDecoder<R> {
         let mut c = Vec::with_capacity(68);
         c.extend_from_slice(b"smpl");
         c.extend_from_slice(&60u32.to_le_bytes()); // chunk body size
-        // manufacturer, product, sample_period, midi_unity_note, midi_pitch_fraction,
-        // smpte_format, smpte_offset, num_sample_loops, sampler_data
+                                                   // manufacturer, product, sample_period, midi_unity_note, midi_pitch_fraction,
+                                                   // smpte_format, smpte_offset, num_sample_loops, sampler_data
         for v in [0u32, 0, sample_period, 60, 0, 0, 0, 1, 0] {
             c.extend_from_slice(&v.to_le_bytes());
         }

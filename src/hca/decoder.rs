@@ -214,11 +214,14 @@ mod crc_tests {
     fn test_crc16_slice8_matches_naive() {
         // Every length class mod 8, plus a full-frame-sized pseudo-random payload.
         for len in 0..40usize {
-            let data: Vec<u8> =
-                (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(7)).collect();
+            let data: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
+                .collect();
             assert_eq!(crc16_checksum(&data), crc16_naive(&data), "len {len}");
         }
-        let big: Vec<u8> = (0..682u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let big: Vec<u8> = (0..682u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
         assert_eq!(crc16_checksum(&big), crc16_naive(&big));
     }
 }
