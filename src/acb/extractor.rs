@@ -209,11 +209,78 @@ fn get_track_data(
     Ok(None)
 }
 
-/// Convenience function to extract from a file path
-pub fn extract_acb_from_file(
-    acb_path: &Path,
+/// A track extracted to disk together with the metadata needed to decode it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedTrackFile {
+    /// Path of the written waveform file.
+    pub path: String,
+    /// Cue name of the track (also the file stem).
+    pub name: String,
+    /// Cue id of the track.
+    pub cue_id: i32,
+    /// AFS2 subkey of the originating AWB. Required (with the global keycode) to
+    /// decrypt type-56 encrypted HCA; 0 when the AWB is unencrypted.
+    pub subkey: u16,
+}
+
+/// Extract all audio tracks to `target_dir`, returning per-track metadata
+/// (output path, cue name/id, and the originating AWB's AFS2 subkey).
+pub fn extract_acb_tracks<R: Read + Seek>(
+    acb_file: R,
     target_dir: &Path,
-) -> Result<Option<Vec<String>>, ExtractError> {
+    acb_file_path: Option<&Path>,
+) -> Result<Vec<ExtractedTrackFile>, ExtractError> {
+    let utf = UtfTable::new(acb_file)?;
+    let track_list = TrackList::new(&utf)?;
+    let mut embedded_awb = load_embedded_awb(&utf.rows[0]);
+    let mut external_awbs = load_external_awbs(&utf.rows[0], acb_file_path);
+
+    fs::create_dir_all(target_dir)?;
+
+    let mut outputs = Vec::new();
+    for track in &track_list.tracks {
+        if let Some(info) =
+            extract_single_track_file(track, target_dir, &mut embedded_awb, &mut external_awbs)?
+        {
+            outputs.push(info);
+        }
+    }
+    Ok(outputs)
+}
+
+fn extract_single_track_file(
+    track: &Track,
+    target_dir: &Path,
+    embedded_awb: &mut Option<AfsArchive<Cursor<Vec<u8>>>>,
+    external_awbs: &mut [AfsArchive<Cursor<Vec<u8>>>],
+) -> Result<Option<ExtractedTrackFile>, ExtractError> {
+    let ext = wave_type_extension(track.enc_type);
+    let ext = if ext.is_empty() {
+        format!(".{}", track.enc_type)
+    } else {
+        ext.to_string()
+    };
+
+    let filename = format!("{}{}", track.name, ext);
+    let output_path = target_dir.join(&filename);
+
+    let (data, subkey) = match get_track_data(track, embedded_awb, external_awbs)? {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+
+    fs::write(&output_path, data)?;
+    Ok(Some(ExtractedTrackFile {
+        path: output_path.to_string_lossy().into_owned(),
+        name: track.name.clone(),
+        cue_id: track.cue_id,
+        subkey,
+    }))
+}
+
+/// Open and validate an ACB file, returning the seekable handle positioned at
+/// the start, or `None` if the path is missing or is not a valid ACB.
+fn open_validated_acb(acb_path: &Path) -> Result<Option<File>, ExtractError> {
     let info = match fs::metadata(acb_path) {
         Ok(i) => i,
         Err(_) => return Ok(None),
@@ -226,20 +293,40 @@ pub fn extract_acb_from_file(
 
     let mut file = File::open(acb_path)?;
 
-    // Read and validate the first 4 bytes
+    // Read and validate the @UTF magic (0x40 0x55 0x54 0x46)
     let mut header = [0u8; 4];
-    use std::io::Read;
     file.read_exact(&mut header)?;
-
-    // Check for @UTF magic (0x40 0x55 0x54 0x46)
     if header != [0x40, 0x55, 0x54, 0x46] {
         return Ok(None); // Not a valid ACB file
     }
 
-    // Seek back to start
-    use std::io::Seek;
     file.seek(std::io::SeekFrom::Start(0))?;
+    Ok(Some(file))
+}
 
+/// Convenience function to extract from a file path
+pub fn extract_acb_from_file(
+    acb_path: &Path,
+    target_dir: &Path,
+) -> Result<Option<Vec<String>>, ExtractError> {
+    let file = match open_validated_acb(acb_path)? {
+        Some(f) => f,
+        None => return Ok(None),
+    };
     let outputs = extract_acb(file, target_dir, Some(acb_path))?;
+    Ok(Some(outputs))
+}
+
+/// Like [`extract_acb_from_file`], but returns per-track metadata (output path,
+/// cue name/id, and AFS2 subkey) instead of just the written paths.
+pub fn extract_acb_tracks_from_file(
+    acb_path: &Path,
+    target_dir: &Path,
+) -> Result<Option<Vec<ExtractedTrackFile>>, ExtractError> {
+    let file = match open_validated_acb(acb_path)? {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+    let outputs = extract_acb_tracks(file, target_dir, Some(acb_path))?;
     Ok(Some(outputs))
 }

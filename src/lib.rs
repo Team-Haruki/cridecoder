@@ -14,7 +14,10 @@ pub mod usm;
 mod python;
 
 // ACB/AWB exports
-pub use acb::{extract_acb, extract_acb_from_file, extract_acb_to_memory, ExtractedAcbTrack};
+pub use acb::{
+    extract_acb, extract_acb_from_file, extract_acb_to_memory, extract_acb_tracks,
+    extract_acb_tracks_from_file, ExtractedAcbTrack, ExtractedTrackFile,
+};
 pub use acb::{AcbBuilder, AfsArchiveBuilder, BuilderError, TrackInput, UtfTableBuilder};
 
 // HCA exports

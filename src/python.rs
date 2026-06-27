@@ -37,6 +37,101 @@ fn extract_acb(acb_path: &str, output_dir: &str) -> PyResult<Option<Vec<String>>
         .map_err(|e| PyRuntimeError::new_err(format!("ACB extraction failed: {}", e)))
 }
 
+/// Extract audio tracks from an ACB file, returning per-track metadata.
+///
+/// Unlike :func:`extract_acb`, this also surfaces each track's cue id and the
+/// AFS2 subkey of the AWB it came from, which is required (together with the
+/// global keycode) to decode type-56 encrypted HCA.
+///
+/// Args:
+///     acb_path: Path to the ACB file
+///     output_dir: Directory to write extracted files to
+///
+/// Returns:
+///     List of dicts ``{"path", "name", "cue_id", "subkey"}``, or None if the
+///     file is invalid.
+#[pyfunction]
+fn extract_acb_tracks<'py>(
+    py: Python<'py>,
+    acb_path: &str,
+    output_dir: &str,
+) -> PyResult<Option<Vec<Bound<'py, pyo3::types::PyDict>>>> {
+    let acb_path = Path::new(acb_path);
+    let output_dir = Path::new(output_dir);
+    fs::create_dir_all(output_dir)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create output dir: {}", e)))?;
+
+    let tracks = acb::extract_acb_tracks_from_file(acb_path, output_dir)
+        .map_err(|e| PyRuntimeError::new_err(format!("ACB extraction failed: {}", e)))?;
+
+    let tracks = match tracks {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let mut out = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("path", track.path)?;
+        dict.set_item("name", track.name)?;
+        dict.set_item("cue_id", track.cue_id)?;
+        dict.set_item("subkey", track.subkey)?;
+        out.push(dict);
+    }
+    Ok(Some(out))
+}
+
+/// Extract an ACB and decode its HCA tracks straight to WAV files.
+///
+/// The per-AWB AFS2 subkey is read and applied automatically, so encrypted
+/// (type-56) ACBs only need the global ``key``. Non-HCA tracks are written out
+/// verbatim with their original extension.
+///
+/// Args:
+///     acb_path: Path to the ACB file
+///     output_dir: Directory to write the decoded WAV (and any raw) files to
+///     key: Global HCA keycode (omit/None for unencrypted ACBs)
+///
+/// Returns:
+///     List of written file paths.
+#[pyfunction]
+#[pyo3(signature = (acb_path, output_dir, key=None))]
+fn decode_acb_to_wav(acb_path: &str, output_dir: &str, key: Option<u64>) -> PyResult<Vec<String>> {
+    let out_dir = Path::new(output_dir);
+    fs::create_dir_all(out_dir)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create output dir: {}", e)))?;
+
+    let file = fs::File::open(acb_path)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to open ACB: {}", e)))?;
+
+    let tracks = acb::extract_acb_to_memory(file, Some(Path::new(acb_path)))
+        .map_err(|e| PyRuntimeError::new_err(format!("ACB extraction failed: {}", e)))?;
+
+    let mut outputs = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        if track.extension == "hca" {
+            let mut decoder = HcaDecoder::from_reader(Cursor::new(track.data))
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse HCA: {}", e)))?;
+            if let Some(k) = key {
+                decoder.set_encryption_key(k, track.subkey as u64);
+            }
+            let wav_path = out_dir.join(format!("{}.wav", track.name));
+            let mut wav = fs::File::create(&wav_path)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to create WAV: {}", e)))?;
+            decoder
+                .decode_to_wav(&mut wav)
+                .map_err(|e| PyRuntimeError::new_err(format!("HCA decode failed: {}", e)))?;
+            outputs.push(wav_path.to_string_lossy().into_owned());
+        } else {
+            let raw_path = out_dir.join(format!("{}.{}", track.name, track.extension));
+            fs::write(&raw_path, &track.data)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to write track: {}", e)))?;
+            outputs.push(raw_path.to_string_lossy().into_owned());
+        }
+    }
+    Ok(outputs)
+}
+
 /// Build an ACB file from track data.
 ///
 /// Args:
@@ -515,6 +610,8 @@ fn read_usm_metadata(usm_path: &str) -> PyResult<String> {
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ACB functions
     m.add_function(wrap_pyfunction!(extract_acb, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_acb_tracks, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_acb_to_wav, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb, m)?)?;
     m.add_function(wrap_pyfunction!(build_acb_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(build_music_acb_bytes, m)?)?;
