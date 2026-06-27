@@ -32,6 +32,9 @@ const MASK_LEN: usize = 0x20;
 type VideoMask = ([u8; MASK_LEN], [u8; MASK_LEN]);
 type AudioMask = [u8; MASK_LEN];
 
+/// (filename, has_audio, mpeg_codec, audio_codec) parsed from the USM CRID header.
+type UsmHeaderInfo = (Vec<u8>, bool, Option<u32>, Option<u32>);
+
 /// USM extraction errors
 #[derive(Debug, Error)]
 pub enum UsmError {
@@ -464,7 +467,7 @@ pub fn extract_usm_to_memory<R: Read + Seek>(
 fn parse_usm_header<R: Read + Seek>(
     reader: &mut Reader<R>,
     fallback_name: &[u8],
-) -> Result<(Vec<u8>, bool, Option<u32>, Option<u32>), UsmError> {
+) -> Result<UsmHeaderInfo, UsmError> {
     let sig = reader.read_bytes(4)?;
     if &sig != b"CRID" {
         return Err(UsmError::InvalidCridSignature);

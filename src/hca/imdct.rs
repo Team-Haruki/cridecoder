@@ -214,9 +214,10 @@ pub fn imdct_transform(ch: &mut StChannel, subframe: usize) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
-            return unsafe { imdct_transform_avx2(ch, subframe) };
+            unsafe { imdct_transform_avx2(ch, subframe) }
+        } else {
+            imdct_body::<false>(ch, subframe)
         }
-        return imdct_body::<false>(ch, subframe);
     }
     #[cfg(not(target_arch = "x86_64"))]
     imdct_body::<false>(ch, subframe);

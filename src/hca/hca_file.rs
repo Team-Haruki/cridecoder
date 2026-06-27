@@ -448,11 +448,9 @@ impl<R: Read + Seek> HcaDecoder<R> {
         let end = (self.info.loop_end_block * spb)
             .saturating_add(spb.saturating_sub(self.info.loop_end_padding))
             .saturating_sub(delay);
-        let sample_period = if self.info.sampling_rate > 0 {
-            1_000_000_000u32 / self.info.sampling_rate
-        } else {
-            0
-        };
+        let sample_period = 1_000_000_000u32
+            .checked_div(self.info.sampling_rate)
+            .unwrap_or(0);
         let mut c = Vec::with_capacity(68);
         c.extend_from_slice(b"smpl");
         c.extend_from_slice(&60u32.to_le_bytes()); // chunk body size
