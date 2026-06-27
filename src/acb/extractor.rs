@@ -83,9 +83,7 @@ pub fn extract_acb_to_memory<R: Read + Seek>(
     Ok(outputs)
 }
 
-fn load_embedded_awb(
-    row: &std::collections::HashMap<String, crate::acb::utf::Value>,
-) -> Option<AfsArchive<Cursor<Vec<u8>>>> {
+fn load_embedded_awb(row: &crate::acb::utf::ValueMap) -> Option<AfsArchive<Cursor<Vec<u8>>>> {
     let awb_data = get_bytes_field(row, "AwbFile")?;
     if awb_data.is_empty() {
         return None;
@@ -94,7 +92,7 @@ fn load_embedded_awb(
 }
 
 fn load_external_awbs(
-    row: &std::collections::HashMap<String, crate::acb::utf::Value>,
+    row: &crate::acb::utf::ValueMap,
     acb_file_path: Option<&Path>,
 ) -> Vec<AfsArchive<Cursor<Vec<u8>>>> {
     let mut external_awbs = Vec::new();
