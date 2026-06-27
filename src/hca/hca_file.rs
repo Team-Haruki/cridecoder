@@ -28,7 +28,9 @@ const HCA_KEY_MAX_TOTAL_SCORE: i32 = HCA_KEY_MAX_TEST_FRAMES * 50 * HCA_KEY_SCOR
 pub struct HcaDecoder<R: Read + Seek> {
     reader: R,
     info: HcaInfo,
-    handle: ClHca,
+    // Boxed: ClHca is large; keeping it inline makes HcaDecoder big enough that a
+    // few decoders in one stack frame overflow a 2 MB thread stack.
+    handle: Box<ClHca>,
     buf: Vec<u8>,
     fbuf: Vec<f32>,
     current_delay: i32,
@@ -69,7 +71,7 @@ impl<R: Read + Seek> HcaDecoder<R> {
         reader.read_exact(&mut full_header)?;
 
         // Initialize decoder
-        let mut handle = ClHca::new();
+        let mut handle = Box::new(ClHca::new());
         handle.decode_header(&full_header)?;
 
         let info = handle.get_info()?;
@@ -386,10 +388,14 @@ impl<R: Read + Seek> HcaDecoder<R> {
         let total_samples = self.total_valid_samples() as usize;
         let total_pcm_bytes = total_samples * self.info.channel_count as usize * 2;
 
+        // Optional WAV sampler (smpl) chunk carrying the HCA loop region.
+        let smpl_chunk = self.loop_smpl_chunk();
+
         // Write WAV header
         let mut header = [0u8; 44];
         header[0..4].copy_from_slice(b"RIFF");
-        header[4..8].copy_from_slice(&((36 + total_pcm_bytes) as u32).to_le_bytes());
+        header[4..8]
+            .copy_from_slice(&((36 + total_pcm_bytes + smpl_chunk.len()) as u32).to_le_bytes());
         header[8..12].copy_from_slice(b"WAVE");
         header[12..16].copy_from_slice(b"fmt ");
         header[16..20].copy_from_slice(&16u32.to_le_bytes()); // fmt chunk size
@@ -415,7 +421,47 @@ impl<R: Read + Seek> HcaDecoder<R> {
             }
             write_pcm_i16_le(w, pcm, &mut data_buf)?;
             Ok(())
-        })
+        })?;
+
+        if !smpl_chunk.is_empty() {
+            w.write_all(&smpl_chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Build a WAV `smpl` chunk for the HCA loop region, or empty if not looping.
+    /// Loop samples per clhca.c: start = loop_start_block*spb + loop_start_delay
+    /// - encoder_delay; end = loop_end_block*spb + (spb - loop_end_padding) - delay.
+    fn loop_smpl_chunk(&self) -> Vec<u8> {
+        if !self.info.loop_enabled {
+            return Vec::new();
+        }
+        let spb = self.info.samples_per_block as u32;
+        let delay = self.info.encoder_delay;
+        let start = (self.info.loop_start_block * spb)
+            .saturating_add(self.info.loop_start_delay)
+            .saturating_sub(delay);
+        let end = (self.info.loop_end_block * spb)
+            .saturating_add(spb.saturating_sub(self.info.loop_end_padding))
+            .saturating_sub(delay);
+        let sample_period = if self.info.sampling_rate > 0 {
+            1_000_000_000u32 / self.info.sampling_rate
+        } else {
+            0
+        };
+        let mut c = Vec::with_capacity(68);
+        c.extend_from_slice(b"smpl");
+        c.extend_from_slice(&60u32.to_le_bytes()); // chunk body size
+        // manufacturer, product, sample_period, midi_unity_note, midi_pitch_fraction,
+        // smpte_format, smpte_offset, num_sample_loops, sampler_data
+        for v in [0u32, 0, sample_period, 60, 0, 0, 0, 1, 0] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        // one forward loop: identifier, type, start, end, fraction, play_count
+        for v in [0u32, 0, start, end, 0, 0] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        c
     }
 }
 
