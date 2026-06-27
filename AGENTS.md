@@ -6,7 +6,7 @@
 
 ### Credits
 
-CRI format implementation is based on [vgmstream](https://github.com/vgmstream/vgmstream).
+CRI format implementation is based on [vgmstream](https://github.com/vgmstream/vgmstream) and [PyCriCodecs](https://github.com/Youjose/PyCriCodecs/).
 
 ## Architecture
 
@@ -20,10 +20,13 @@ src/
 │   ├── utf.rs      # CRI UTF table parser
 │   ├── afs.rs      # AFS2 archive parser
 │   ├── track.rs    # Track list extraction from ACB
-│   └── extractor.rs # ACB extraction logic
+│   ├── extractor.rs # ACB extraction logic (disk + in-memory + de-duplicated)
+│   ├── decode.rs   # High-level ACB → WAV decoding (extract + HCA decode + subkey)
+│   └── builder.rs  # ACB/AWB/UTF table builders
 ├── hca.rs          # HCA module root (re-exports submodules)
 ├── hca/
 │   ├── decoder.rs  # Core HCA decoder (ClHca, header parsing, block decoding)
+│   ├── encoder.rs  # HCA encoder (PCM/WAV → HCA, optional encryption)
 │   ├── hca_file.rs # High-level HcaDecoder with streaming, WAV output, key testing
 │   ├── tables.rs   # Lookup tables for HCA decoding
 │   ├── cipher.rs   # HCA encryption/decryption cipher
@@ -33,16 +36,33 @@ src/
 ├── usm.rs          # USM module root (re-exports submodules)
 ├── usm/
 │   ├── extractor.rs # USM extraction (video/audio stream demuxing)
+│   ├── builder.rs   # USM container builder
 │   └── metadata.rs  # USM metadata reading and JSON export
 └── python.rs       # Python bindings (behind "python" feature)
 ```
 
 ## Key Types
 
-- `extract_acb_from_file()` / `extract_acb()` — ACB extraction entry points
-- `HcaDecoder` — High-level HCA to WAV/PCM decoder
-- `extract_usm_file()` / `extract_usm()` — USM extraction entry points
-- `ClHca` — Low-level HCA decoder state machine
+ACB extraction has three flavors, each with a disk and an in-memory variant:
+
+- `extract_acb_from_file()` / `extract_acb()` — extract tracks to a directory (returns written paths)
+- `extract_acb_tracks_from_file()` / `extract_acb_tracks()` — same, plus per-track metadata (`ExtractedTrackFile` with `name`, `cue_id`, `subkey`)
+- `extract_acb_to_memory()` — extract waveform bytes per cue without touching disk (`ExtractedAcbTrack`)
+- `extract_acb_unique_to_memory()` — extract each physical waveform **once**, mapping shared cues onto it (`UniqueWaveform` + `AcbCueRef`); ACBs often point several cues at one waveform
+
+High-level decode (extract + HCA decode in one call, per-AWB AFS2 subkey applied automatically):
+
+- `decode_acb_to_wav_from_file()` / `decode_acb_to_wav()` — write decoded WAVs to a directory
+- `decode_acb_to_wav_to_memory()` — return decoded `DecodedAcbTrack`s in memory; encrypted (type-56) ACBs need only the global keycode
+
+Other entry points:
+
+- `AcbBuilder` / `TrackInput` — build ACB/AWB containers
+- `HcaDecoder` — high-level HCA to WAV/PCM decoder; `HcaEncoder` — PCM/WAV to HCA
+- `ClHca` — low-level HCA decoder state machine
+- `extract_usm_file()` / `extract_usm()` — USM extraction (disk); `extract_usm_to_memory()` — in-memory; `UsmBuilder` — build USM
+
+**Python bindings** (`src/python.rs`, behind the `python` feature) mirror this surface. Each disk function has a `*_bytes` in-memory counterpart that takes/returns `bytes` via `Cursor` (no `.to_vec()` copy). The `.pyi` stubs in `cridecoder.pyi` are the source of truth for the Python signatures and must stay in sync with the bindings.
 
 ## Building
 
@@ -89,6 +109,7 @@ Allowed types:
 | `[Fix]`   | Bug fix                                               |
 | `[Chore]` | Maintenance, refactoring, dependency or build changes |
 | `[Docs]`  | Documentation-only changes                            |
+| `[Perf]`  | Performance improvement (no behavior change)          |
 
 Rules:
 
