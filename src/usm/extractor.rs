@@ -77,6 +77,37 @@ pub struct ExtractedUsmStream {
     pub data: Vec<u8>,
 }
 
+/// Read the first row's named integer column as u32 (codec fields), if present.
+fn utf_first_u32(table: &UtfTable, key: &str) -> Option<u32> {
+    Some(match table.first()?.get(key)? {
+        UtfValue::Byte(v) => *v as u32,
+        UtfValue::SByte(v) => *v as u32,
+        UtfValue::UShort(v) => *v as u32,
+        UtfValue::Short(v) => *v as u32,
+        UtfValue::UInt(v) => *v,
+        UtfValue::Int(v) => *v as u32,
+        UtfValue::ULong(v) => *v as u32,
+        _ => return None,
+    })
+}
+
+/// @SFA AUDIO_HDRINFO.audio_codec: 2 = ADX, 4 = HCA (PyCriCodecs usm.py:168).
+/// Defaults to adx when the column is absent (e.g. minimal builder-made USMs).
+fn audio_ext(audio_codec: Option<u32>) -> &'static str {
+    match audio_codec {
+        Some(4) => "hca",
+        _ => "adx",
+    }
+}
+
+/// @SFV VIDEO_HDRINFO.mpeg_codec: 9 = VP9 (pjsk) -> ivf; default m2v (MPEG2).
+fn video_ext(mpeg_codec: Option<u32>) -> &'static str {
+    match mpeg_codec {
+        Some(9) => "ivf",
+        _ => "m2v",
+    }
+}
+
 /// Read column data from a UTF table
 fn read_column_data<R: Read + Seek>(
     reader: &mut Reader<R>,
@@ -344,13 +375,24 @@ pub fn extract_usm<R: Read + Seek>(
 
     let (vmask, amask) = key.map(get_mask).unzip();
 
-    let (filename, has_audio) = parse_usm_header(&mut reader, fallback_name)?;
+    let (filename, has_audio, mpeg_codec, audio_codec) =
+        parse_usm_header(&mut reader, fallback_name)?;
     let decoded_filename = decode_shift_jis(&filename);
 
-    let (mut video_file, audio_file, output_files) =
-        create_output_files(target_dir, &decoded_filename, has_audio, export_audio)?;
+    let (mut video_file, audio_file, output_files) = create_output_files(
+        target_dir,
+        &decoded_filename,
+        has_audio,
+        export_audio,
+        mpeg_codec,
+        audio_codec,
+    )?;
 
     let mut audio_file = audio_file;
+
+    // The USM audio XOR mask applies only to ADX (codec 2); HCA has its own
+    // internal cipher, so masking it would corrupt the stream (PyCriCodecs usm.py:273).
+    let amask = if audio_codec == Some(2) { amask } else { None };
 
     extract_usm_chunks(
         &mut reader,
@@ -372,7 +414,8 @@ pub fn extract_usm_to_memory<R: Read + Seek>(
 ) -> Result<Vec<ExtractedUsmStream>, UsmError> {
     let mut reader = Reader::new(usm);
     let (vmask, amask) = key.map(get_mask).unzip();
-    let (filename, has_audio) = parse_usm_header(&mut reader, fallback_name)?;
+    let (filename, has_audio, mpeg_codec, audio_codec) =
+        parse_usm_header(&mut reader, fallback_name)?;
     let decoded_filename = decode_shift_jis(&filename);
     let base_name = Path::new(&decoded_filename)
         .file_stem()
@@ -380,12 +423,17 @@ pub fn extract_usm_to_memory<R: Read + Seek>(
         .unwrap_or(&decoded_filename)
         .to_string();
 
+    // Audio mask only applies to ADX (codec 2); HCA carries its own cipher.
+    let amask = if audio_codec == Some(2) { amask } else { None };
+
     extract_usm_chunks_to_memory(
         &mut reader,
         base_name,
         has_audio && export_audio,
         vmask.as_ref(),
         amask.as_ref(),
+        mpeg_codec,
+        audio_codec,
     )
 }
 
@@ -393,7 +441,7 @@ pub fn extract_usm_to_memory<R: Read + Seek>(
 fn parse_usm_header<R: Read + Seek>(
     reader: &mut Reader<R>,
     fallback_name: &[u8],
-) -> Result<(Vec<u8>, bool), UsmError> {
+) -> Result<(Vec<u8>, bool, Option<u32>, Option<u32>), UsmError> {
     let sig = reader.read_bytes(4)?;
     if &sig != b"CRID" {
         return Err(UsmError::InvalidCridSignature);
@@ -406,10 +454,10 @@ fn parse_usm_header<R: Read + Seek>(
     let filename = extract_filename(&entry_table, fallback_name);
     let offset = 8 + block_size as i64;
 
-    let (has_audio, offset) = parse_usm_header_chunks(reader, offset)?;
+    let (has_audio, mpeg_codec, audio_codec, offset) = parse_usm_header_chunks(reader, offset)?;
     skip_metadata_section(reader, offset)?;
 
-    Ok((filename, has_audio))
+    Ok((filename, has_audio, mpeg_codec, audio_codec))
 }
 
 /// Extract filename from entry table
@@ -429,12 +477,14 @@ fn extract_filename(entry_table: &UtfTable, fallback_name: &[u8]) -> Vec<u8> {
 fn parse_usm_header_chunks<R: Read + Seek>(
     reader: &mut Reader<R>,
     mut offset: i64,
-) -> Result<(bool, i64), UsmError> {
+) -> Result<(bool, Option<u32>, Option<u32>, i64), UsmError> {
     // First @SFV chunk
     seek_and_check_signature(reader, offset, "@SFV")?;
     let block_size = reader.read_u32()?;
     reader.seek(SeekFrom::Start((offset + 0x20) as u64))?;
-    let _ = get_utf_table(reader)?;
+    let sfv_table = get_utf_table(reader)?;
+    let mpeg_codec = utf_first_u32(&sfv_table, "mpeg_codec");
+    let mut audio_codec: Option<u32> = None;
     offset += 8 + block_size as i64;
 
     // Check for optional @SFA chunk
@@ -446,7 +496,8 @@ fn parse_usm_header_chunks<R: Read + Seek>(
     if &next_sig == b"@SFA" {
         let block_size = reader.read_u32()?;
         reader.seek(SeekFrom::Start((offset + 0x20) as u64))?;
-        let _ = get_utf_table(reader)?;
+        let sfa_table = get_utf_table(reader)?;
+        audio_codec = utf_first_u32(&sfa_table, "audio_codec");
         offset += 8 + block_size as i64;
         has_audio = true;
         reader.seek(SeekFrom::Start(offset as u64))?;
@@ -477,7 +528,7 @@ fn parse_usm_header_chunks<R: Read + Seek>(
         offset += 8 + block_size as i64;
     }
 
-    Ok((has_audio, offset))
+    Ok((has_audio, mpeg_codec, audio_codec, offset))
 }
 
 /// Seek to offset and check signature
@@ -525,18 +576,20 @@ fn create_output_files(
     decoded_filename: &str,
     has_audio: bool,
     export_audio: bool,
+    mpeg_codec: Option<u32>,
+    audio_codec: Option<u32>,
 ) -> Result<(File, Option<File>, Vec<PathBuf>), UsmError> {
     let base_name = Path::new(decoded_filename)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(decoded_filename);
 
-    let video_path = target_dir.join(format!("{}.m2v", base_name));
+    let video_path = target_dir.join(format!("{}.{}", base_name, video_ext(mpeg_codec)));
     let video_file = File::create(&video_path)?;
 
     let mut output_files = vec![video_path];
     let audio_file = if has_audio && export_audio {
-        let audio_path = target_dir.join(format!("{}.adx", base_name));
+        let audio_path = target_dir.join(format!("{}.{}", base_name, audio_ext(audio_codec)));
         let file = File::create(&audio_path)?;
         output_files.push(audio_path);
         Some(file)
@@ -596,12 +649,15 @@ fn extract_usm_chunks<R: Read + Seek>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_usm_chunks_to_memory<R: Read + Seek>(
     reader: &mut Reader<R>,
     base_name: String,
     export_audio: bool,
     vmask: Option<&VideoMask>,
     amask: Option<&AudioMask>,
+    mpeg_codec: Option<u32>,
+    audio_codec: Option<u32>,
 ) -> Result<Vec<ExtractedUsmStream>, UsmError> {
     let mut video = Vec::new();
     let mut audio = if export_audio { Some(Vec::new()) } else { None };
@@ -645,13 +701,13 @@ fn extract_usm_chunks_to_memory<R: Read + Seek>(
 
     let mut streams = vec![ExtractedUsmStream {
         name: base_name.clone(),
-        extension: "m2v".to_string(),
+        extension: video_ext(mpeg_codec).to_string(),
         data: video,
     }];
     if let Some(audio) = audio {
         streams.push(ExtractedUsmStream {
             name: base_name,
-            extension: "adx".to_string(),
+            extension: audio_ext(audio_codec).to_string(),
             data: audio,
         });
     }
@@ -736,4 +792,38 @@ pub fn extract_usm_file(
         .map(|s| s.as_bytes().to_vec())
         .unwrap_or_default();
     extract_usm(file, target_dir, &fallback_name, key, export_audio)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_codec_extension_mapping() {
+        // Audio: 2=ADX, 4=HCA (PyCriCodecs usm.py:168); default adx.
+        assert_eq!(audio_ext(Some(2)), "adx");
+        assert_eq!(audio_ext(Some(4)), "hca");
+        assert_eq!(audio_ext(None), "adx");
+        // Video: 9=VP9 -> ivf (pjsk); default m2v.
+        assert_eq!(video_ext(Some(9)), "ivf");
+        assert_eq!(video_ext(Some(1)), "m2v");
+        assert_eq!(video_ext(None), "m2v");
+    }
+
+    #[test]
+    fn test_utf_first_u32_reads_codec_column() {
+        let mut row = std::collections::HashMap::new();
+        row.insert("audio_codec".to_string(), UtfValue::Byte(4));
+        row.insert("mpeg_codec".to_string(), UtfValue::UInt(9));
+        let table: UtfTable = vec![row];
+        assert_eq!(utf_first_u32(&table, "audio_codec"), Some(4));
+        assert_eq!(utf_first_u32(&table, "mpeg_codec"), Some(9));
+        assert_eq!(utf_first_u32(&table, "missing"), None);
+
+        // Non-integer columns and empty tables yield None.
+        let mut row2 = std::collections::HashMap::new();
+        row2.insert("name".to_string(), UtfValue::String(b"x".to_vec()));
+        assert_eq!(utf_first_u32(&vec![row2], "name"), None);
+        assert_eq!(utf_first_u32(&Vec::new(), "audio_codec"), None);
+    }
 }
