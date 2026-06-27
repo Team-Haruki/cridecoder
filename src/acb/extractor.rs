@@ -12,6 +12,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedAcbTrack {
     pub name: String,
+    /// Cue id of the track (cue-table index).
+    pub cue_id: i32,
     pub extension: String,
     pub data: Vec<u8>,
     /// AFS2 subkey of the AWB this waveform came from. Required (together with the
@@ -79,6 +81,7 @@ pub fn extract_acb_to_memory<R: Read + Seek>(
         };
         outputs.push(ExtractedAcbTrack {
             name: track.name.clone(),
+            cue_id: track.cue_id,
             extension,
             data,
             subkey,
