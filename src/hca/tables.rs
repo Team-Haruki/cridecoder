@@ -89,7 +89,10 @@ pub const INTENSITY_RATIO_TABLE: [f32; 16] = f32_table(&[
 /// Max bit table for decoding
 pub const MAX_BIT_TABLE: [u8; 16] = [0, 2, 3, 3, 4, 4, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
-/// Read bit table for decoding
+/// Read bit table for decoding. The decoder hot path computes consumed bits
+/// arithmetically (see `DEQ_USED_BASE` in decoder.rs); this table is retained
+/// as the reference model and checked against it in tests.
+#[allow(dead_code)]
 pub const READ_BIT_TABLE: [u8; 128] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     2, 2, 2, 2, 2, 2, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0,

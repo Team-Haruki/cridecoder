@@ -405,7 +405,7 @@ pub fn extract_usm<R: Read + Seek>(
         parse_usm_header(&mut reader, fallback_name)?;
     let decoded_filename = decode_shift_jis(&filename);
 
-    let (mut video_file, audio_file, output_files) = create_output_files(
+    let (video_file, audio_file, output_files) = create_output_files(
         target_dir,
         &decoded_filename,
         has_audio,
@@ -414,19 +414,27 @@ pub fn extract_usm<R: Read + Seek>(
         audio_codec,
     )?;
 
-    let mut audio_file = audio_file;
-
     // The USM audio XOR mask applies only to ADX (codec 2); HCA has its own
     // internal cipher, so masking it would corrupt the stream (PyCriCodecs usm.py:273).
     let amask = if audio_codec == Some(2) { amask } else { None };
 
+    // Buffer the outputs: chunk payloads are ~32 KiB and io::copy uses an
+    // 8 KiB buffer, so unbuffered files pay several write syscalls per chunk.
+    let mut video_out = io::BufWriter::with_capacity(1 << 20, video_file);
+    let mut audio_out = audio_file.map(|f| io::BufWriter::with_capacity(1 << 20, f));
+
     extract_usm_chunks(
         &mut reader,
-        &mut video_file,
-        audio_file.as_mut(),
+        &mut video_out,
+        audio_out.as_mut(),
         vmask.as_ref(),
         amask.as_ref(),
     )?;
+
+    video_out.flush()?;
+    if let Some(audio_out) = audio_out.as_mut() {
+        audio_out.flush()?;
+    }
 
     Ok(output_files)
 }
@@ -627,10 +635,10 @@ fn create_output_files(
 }
 
 /// Extract USM chunks
-fn extract_usm_chunks<R: Read + Seek>(
+fn extract_usm_chunks<R: Read + Seek, W: Write>(
     reader: &mut Reader<R>,
-    video_file: &mut File,
-    mut audio_file: Option<&mut File>,
+    video_file: &mut W,
+    mut audio_file: Option<&mut W>,
     vmask: Option<&VideoMask>,
     amask: Option<&AudioMask>,
 ) -> Result<(), UsmError> {
@@ -685,7 +693,15 @@ fn extract_usm_chunks_to_memory<R: Read + Seek>(
     mpeg_codec: Option<u32>,
     audio_codec: Option<u32>,
 ) -> Result<Vec<ExtractedUsmStream>, UsmError> {
-    let mut video = Vec::new();
+    // Pre-reserve using the remaining stream length: payload is the file
+    // minus headers/footers, so this slightly over-reserves but avoids every
+    // growth realloc (the payload is tens of MB).
+    let here = reader.stream_position()?;
+    let total = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(here))?;
+    let remaining = (total - here) as usize;
+
+    let mut video = Vec::with_capacity(remaining);
     let mut audio = if export_audio { Some(Vec::new()) } else { None };
 
     while let Ok(next_sig) = reader.read_bytes(4) {
@@ -713,12 +729,10 @@ fn extract_usm_chunks_to_memory<R: Read + Seek>(
             block_size as usize - chunk_header_size as usize - chunk_footer_size as usize;
 
         if next_sig == b"@SFV" {
-            let content = read_usm_chunk_to_vec(reader, read_data_len, data_type, vmask, None)?;
-            video.extend_from_slice(&content);
+            read_usm_chunk_into(reader, read_data_len, data_type, vmask, None, &mut video)?;
         } else if next_sig == b"@SFA" {
             if let Some(audio) = audio.as_mut() {
-                let content = read_usm_chunk_to_vec(reader, read_data_len, data_type, None, amask)?;
-                audio.extend_from_slice(&content);
+                read_usm_chunk_into(reader, read_data_len, data_type, None, amask, audio)?;
             }
         }
 
@@ -741,37 +755,38 @@ fn extract_usm_chunks_to_memory<R: Read + Seek>(
     Ok(streams)
 }
 
-fn read_usm_chunk_to_vec<R: Read + Seek>(
+/// Read one chunk payload straight into the tail of `out` (single copy from
+/// the source, no intermediate buffer), de-masking in place when needed.
+fn read_usm_chunk_into<R: Read + Seek>(
     reader: &mut Reader<R>,
     read_data_len: usize,
     data_type: u8,
     vmask: Option<&VideoMask>,
     amask: Option<&AudioMask>,
-) -> Result<Vec<u8>, UsmError> {
-    let mut content = reader.read_bytes(read_data_len)?;
+    out: &mut Vec<u8>,
+) -> Result<(), UsmError> {
+    let start = out.len();
+    reader.read_into_vec(read_data_len, out)?;
     if data_type != 0 {
-        return Ok(content);
+        return Ok(());
     }
     if let Some(vmask) = vmask {
-        mask_video(&mut content, vmask);
-        return Ok(content);
+        mask_video(&mut out[start..], vmask);
+    } else if let Some(amask) = amask {
+        mask_audio(&mut out[start..], amask);
     }
-    if let Some(amask) = amask {
-        mask_audio(&mut content, amask);
-        return Ok(content);
-    }
-    Ok(content)
+    Ok(())
 }
 
 /// Process a chunk
 #[allow(clippy::too_many_arguments)]
-fn process_chunk<R: Read + Seek>(
+fn process_chunk<R: Read + Seek, W: Write>(
     reader: &mut Reader<R>,
     sig: &[u8],
     read_data_len: usize,
     data_type: u8,
-    video_file: &mut File,
-    audio_file: &mut Option<&mut File>,
+    video_file: &mut W,
+    audio_file: &mut Option<&mut W>,
     vmask: Option<&VideoMask>,
     amask: Option<&AudioMask>,
 ) -> Result<(), UsmError> {

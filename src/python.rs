@@ -95,14 +95,23 @@ fn extract_acb_tracks<'py>(
 /// Returns:
 ///     List of written file paths.
 #[pyfunction]
-#[pyo3(signature = (acb_path, output_dir, key=None))]
-fn decode_acb_to_wav(acb_path: &str, output_dir: &str, key: Option<u64>) -> PyResult<Vec<String>> {
+#[pyo3(signature = (acb_path, output_dir, key=None, threads=None))]
+fn decode_acb_to_wav(
+    py: Python<'_>,
+    acb_path: &str,
+    output_dir: &str,
+    key: Option<u64>,
+    threads: Option<usize>,
+) -> PyResult<Vec<String>> {
     let out_dir = Path::new(output_dir);
     fs::create_dir_all(out_dir)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create output dir: {}", e)))?;
 
-    acb::decode_acb_to_wav_from_file(Path::new(acb_path), out_dir, key)
-        .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))
+    let threads = resolve_threads(threads);
+    py.detach(|| {
+        acb::decode_acb_to_wav_from_file_parallel(Path::new(acb_path), out_dir, key, threads)
+    })
+    .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))
 }
 
 /// Extract audio tracks from in-memory ACB bytes (no disk I/O).
@@ -191,13 +200,18 @@ fn extract_acb_unique_bytes<'py>(
 ///     List of dicts ``{"name", "cue_id", "extension", "data"}`` where ``data``
 ///     is WAV bytes for HCA tracks (``extension == "wav"``).
 #[pyfunction]
-#[pyo3(signature = (acb_data, key=None))]
+#[pyo3(signature = (acb_data, key=None, threads=None))]
 fn decode_acb_to_wav_bytes<'py>(
     py: Python<'py>,
     acb_data: &[u8],
     key: Option<u64>,
+    threads: Option<usize>,
 ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
-    let tracks = acb::decode_acb_to_wav_to_memory(Cursor::new(acb_data), None, key)
+    let threads = resolve_threads(threads);
+    let tracks = py
+        .detach(|| {
+            acb::decode_acb_to_wav_to_memory_parallel(Cursor::new(acb_data), None, key, threads)
+        })
         .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))?;
 
     let mut out = Vec::with_capacity(tracks.len());
@@ -334,22 +348,37 @@ fn build_music_acb_bytes(
     Ok(output.into_inner())
 }
 
+/// Resolve the optional `threads` argument shared by the HCA decode bindings:
+/// `None` -> 1 (serial), `0` -> all available cores, `n` -> n.
+fn resolve_threads(threads: Option<usize>) -> usize {
+    match threads {
+        None => 1,
+        Some(0) => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+        Some(n) => n,
+    }
+}
+
 /// Decode an HCA file to WAV format.
 ///
 /// Args:
 ///     hca_path: Path to the HCA file
 ///     wav_path: Path to write the output WAV file
+///     threads: None = serial decode; 0 = use all CPU cores; N = use N threads.
+///         Multithreaded output is byte-identical to serial.
 ///
 /// Returns:
 ///     dict with HCA info (sample_rate, channels, block_count, etc.)
 #[pyfunction]
-#[pyo3(signature = (hca_path, wav_path, key=None, subkey=None))]
+#[pyo3(signature = (hca_path, wav_path, key=None, subkey=None, threads=None))]
 fn decode_hca<'py>(
     py: Python<'py>,
     hca_path: &str,
     wav_path: &str,
     key: Option<u64>,
     subkey: Option<u64>,
+    threads: Option<usize>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let mut decoder = HcaDecoder::from_file(hca_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to open HCA: {}", e)))?;
@@ -363,8 +392,8 @@ fn decode_hca<'py>(
     let mut output = fs::File::create(wav_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create WAV: {}", e)))?;
 
-    decoder
-        .decode_to_wav(&mut output)
+    let threads = resolve_threads(threads);
+    py.detach(|| decoder.decode_to_wav_parallel(&mut output, threads))
         .map_err(|e| PyRuntimeError::new_err(format!("HCA decode failed: {}", e)))?;
 
     let dict = pyo3::types::PyDict::new(py);
@@ -382,21 +411,29 @@ fn decode_hca<'py>(
 ///
 /// Args:
 ///     hca_data: Raw HCA file data as bytes
+///     threads: None = serial decode; 0 = use all CPU cores; N = use N threads.
+///         Multithreaded output is byte-identical to serial.
 ///
 /// Returns:
 ///     WAV file data as bytes
 #[pyfunction]
-#[pyo3(signature = (hca_data, key=None, subkey=None))]
-fn decode_hca_bytes(hca_data: &[u8], key: Option<u64>, subkey: Option<u64>) -> PyResult<Vec<u8>> {
+#[pyo3(signature = (hca_data, key=None, subkey=None, threads=None))]
+fn decode_hca_bytes(
+    py: Python<'_>,
+    hca_data: &[u8],
+    key: Option<u64>,
+    subkey: Option<u64>,
+    threads: Option<usize>,
+) -> PyResult<Vec<u8>> {
     let mut decoder = HcaDecoder::from_reader(Cursor::new(hca_data))
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse HCA: {}", e)))?;
     if let Some(k) = key {
         decoder.set_encryption_key(k, subkey.unwrap_or(0));
     }
 
+    let threads = resolve_threads(threads);
     let mut wav_buf = Vec::new();
-    decoder
-        .decode_to_wav(&mut wav_buf)
+    py.detach(|| decoder.decode_to_wav_parallel(&mut wav_buf, threads))
         .map_err(|e| PyRuntimeError::new_err(format!("HCA decode failed: {}", e)))?;
 
     Ok(wav_buf)

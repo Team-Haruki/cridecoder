@@ -4,7 +4,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub use super::decoder::HcaInfo;
-use super::decoder::{ClHca, HcaError};
+use super::decoder::{pcm_f32_to_i16, ClHca, HcaError, HCA_SUBFRAMES};
+use super::imdct::imdct_overlap;
 
 /// Key test parameters for testing HCA decryption keys
 #[derive(Debug, Clone, Default)]
@@ -32,6 +33,13 @@ pub struct HcaDecoder<R: Read + Seek> {
     // few decoders in one stack frame overflow a 2 MB thread stack.
     handle: Box<ClHca>,
     buf: Vec<u8>,
+    /// Multi-block read-ahead buffer: sequential decoding otherwise issues one
+    /// tiny read syscall per block (~4% of decode time on macOS).
+    chunk: Vec<u8>,
+    /// First block held in `chunk`; `u32::MAX` marks the buffer invalid.
+    chunk_first: u32,
+    /// Number of blocks held in `chunk`.
+    chunk_blocks: u32,
     fbuf: Vec<f32>,
     current_delay: i32,
     current_block: u32,
@@ -87,6 +95,9 @@ impl<R: Read + Seek> HcaDecoder<R> {
             info,
             handle,
             buf,
+            chunk: Vec::new(),
+            chunk_first: u32::MAX,
+            chunk_blocks: 0,
             fbuf,
             current_delay,
             current_block: 0,
@@ -128,21 +139,37 @@ impl<R: Read + Seek> HcaDecoder<R> {
         self.handle.set_key(key);
     }
 
-    /// Read a single HCA frame/block
+    /// Read a single HCA frame/block, served from the read-ahead chunk buffer.
     fn read_packet(&mut self) -> Result<(), HcaDecoderError> {
         if self.current_block >= self.info.block_count {
             return Err(HcaDecoderError::Eof);
         }
 
-        let offset =
-            self.info.header_size as u64 + self.current_block as u64 * self.info.block_size as u64;
-        if self.reader_offset != Some(offset) {
-            self.reader.seek(SeekFrom::Start(offset))?;
+        let block_size = self.info.block_size as usize;
+        let in_chunk = self.current_block >= self.chunk_first
+            && self.current_block - self.chunk_first < self.chunk_blocks;
+        if !in_chunk {
+            // Refill: read up to ~1 MiB of consecutive blocks in one syscall.
+            let max_blocks = ((1 << 20) / block_size).clamp(1, 4096) as u32;
+            let want = max_blocks.min(self.info.block_count - self.current_block);
+            let offset = self.info.header_size as u64
+                + self.current_block as u64 * self.info.block_size as u64;
+            if self.reader_offset != Some(offset) {
+                self.reader.seek(SeekFrom::Start(offset))?;
+            }
+            self.chunk.resize(want as usize * block_size, 0);
+            self.chunk_first = u32::MAX;
+            self.chunk_blocks = 0;
+            self.reader_offset = None;
+            self.reader.read_exact(&mut self.chunk)?;
+            self.reader_offset = Some(offset + self.chunk.len() as u64);
+            self.chunk_first = self.current_block;
+            self.chunk_blocks = want;
         }
-        self.reader.read_exact(&mut self.buf)?;
 
+        let idx = (self.current_block - self.chunk_first) as usize * block_size;
+        self.buf.copy_from_slice(&self.chunk[idx..idx + block_size]);
         self.current_block += 1;
-        self.reader_offset = Some(offset + self.info.block_size as u64);
         Ok(())
     }
 
@@ -385,21 +412,11 @@ impl<R: Read + Seek> HcaDecoder<R> {
         (score, false, new_offset)
     }
 
-    /// Decode the entire file to 16-bit WAV stream
-    pub fn decode_to_wav<W: Write>(&mut self, w: &mut W) -> Result<(), HcaDecoderError> {
-        self.reset();
-
-        let total_samples = self.total_valid_samples() as usize;
-        let total_pcm_bytes = total_samples * self.info.channel_count as usize * 2;
-
-        // Optional WAV sampler (smpl) chunk carrying the HCA loop region.
-        let smpl_chunk = self.loop_smpl_chunk();
-
-        // Write WAV header
+    /// Build the 44-byte RIFF/WAVE header for this file's PCM output.
+    fn wav_header(&self, total_pcm_bytes: usize, smpl_len: usize) -> [u8; 44] {
         let mut header = [0u8; 44];
         header[0..4].copy_from_slice(b"RIFF");
-        header[4..8]
-            .copy_from_slice(&((36 + total_pcm_bytes + smpl_chunk.len()) as u32).to_le_bytes());
+        header[4..8].copy_from_slice(&((36 + total_pcm_bytes + smpl_len) as u32).to_le_bytes());
         header[8..12].copy_from_slice(b"WAVE");
         header[12..16].copy_from_slice(b"fmt ");
         header[16..20].copy_from_slice(&16u32.to_le_bytes()); // fmt chunk size
@@ -413,8 +430,20 @@ impl<R: Read + Seek> HcaDecoder<R> {
         header[34..36].copy_from_slice(&16u16.to_le_bytes()); // bits per sample
         header[36..40].copy_from_slice(b"data");
         header[40..44].copy_from_slice(&(total_pcm_bytes as u32).to_le_bytes());
+        header
+    }
 
-        w.write_all(&header)?;
+    /// Decode the entire file to 16-bit WAV stream
+    pub fn decode_to_wav<W: Write>(&mut self, w: &mut W) -> Result<(), HcaDecoderError> {
+        self.reset();
+
+        let total_samples = self.total_valid_samples() as usize;
+        let total_pcm_bytes = total_samples * self.info.channel_count as usize * 2;
+
+        // Optional WAV sampler (smpl) chunk carrying the HCA loop region.
+        let smpl_chunk = self.loop_smpl_chunk();
+
+        w.write_all(&self.wav_header(total_pcm_bytes, smpl_chunk.len()))?;
 
         let frame_len = self.info.samples_per_block * self.info.channel_count as usize;
         let mut data_buf = vec![0u8; frame_len * 2];
@@ -426,6 +455,150 @@ impl<R: Read + Seek> HcaDecoder<R> {
             write_pcm_i16_le(w, pcm, &mut data_buf)?;
             Ok(())
         })?;
+
+        if !smpl_chunk.is_empty() {
+            w.write_all(&smpl_chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Decode the entire file to 16-bit WAV using multiple threads.
+    ///
+    /// HCA blocks carry no cross-block state apart from the IMDCT overlap
+    /// window (and, only for HCA v3 noise reconstruction, an RNG sequence), so
+    /// the expensive part of each block — checksum, decrypt, bitstream
+    /// unpack, dequantize, DCT stages — runs on `threads` worker threads while
+    /// this thread performs the cheap sequential overlap-add, interleaving and
+    /// writing, in block order. Output is byte-identical to `decode_to_wav`.
+    ///
+    /// Falls back to the serial `decode_to_wav` when `threads <= 1` or when
+    /// the file is not block-parallelizable (HCA v3 with noise reconstruction).
+    pub fn decode_to_wav_parallel<W: Write>(
+        &mut self,
+        w: &mut W,
+        threads: usize,
+    ) -> Result<(), HcaDecoderError> {
+        use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc::sync_channel;
+
+        if threads <= 1 || !self.handle.is_block_parallelizable() {
+            return self.decode_to_wav(w);
+        }
+
+        self.reset();
+
+        let channels = self.info.channel_count as usize;
+        let samples_per_block = self.info.samples_per_block;
+        let block_size = self.info.block_size as usize;
+        let block_count = self.info.block_count as usize;
+        let frame_f32 = channels * samples_per_block;
+
+        let total_valid = self.total_valid_samples();
+        let total_pcm_bytes = total_valid as usize * channels * 2;
+        let smpl_chunk = self.loop_smpl_chunk();
+        w.write_all(&self.wav_header(total_pcm_bytes, smpl_chunk.len()))?;
+
+        // Load the whole audio region; workers slice blocks out of it.
+        let mut data = vec![0u8; block_count * block_size];
+        self.reader
+            .seek(SeekFrom::Start(self.info.header_size as u64))?;
+        self.reader_offset = None;
+        self.reader.read_exact(&mut data)?;
+
+        /// Blocks per work unit: big enough to amortize scheduling and the
+        /// one duplicated seed-block decode per chunk, small enough for good
+        /// load balancing and bounded in-flight memory.
+        const CHUNK_BLOCKS: usize = 32;
+        let num_chunks = block_count.div_ceil(CHUNK_BLOCKS);
+        // No point spawning more workers than work units (each carries a
+        // ClHca clone); also guards against absurd `threads` values.
+        let threads = threads.min(num_chunks);
+        let next_chunk = AtomicUsize::new(0);
+        // Bounded so workers can't run unboundedly ahead of the writer.
+        let (tx, rx) = sync_channel::<(usize, Result<Vec<u8>, HcaError>)>(threads * 2);
+
+        let template = self.handle.as_ref().clone();
+        let delay = self.info.encoder_delay as u64;
+
+        std::thread::scope(|scope| -> Result<(), HcaDecoderError> {
+            for _ in 0..threads {
+                let tx = tx.clone();
+                let next_chunk = &next_chunk;
+                let data = &data[..];
+                let mut hca = template.clone();
+                // Explicit stack size: ClHca is ~170 KiB and debug-build
+                // frames are large; the 2 MiB spawn default (absent
+                // RUST_MIN_STACK) overflows on some targets.
+                std::thread::Builder::new()
+                    .name("hca-decode".into())
+                    .stack_size(8 << 20)
+                    .spawn_scoped(scope, move || {
+                        let mut block = vec![0u8; block_size];
+                        let mut dct = vec![0f32; frame_f32];
+                        let mut prev = vec![[0f32; 128]; channels];
+                        let mut wave = [0f32; 128];
+                        let mut pcm = vec![0i16; frame_f32];
+                        let mut scratch = vec![0u8; frame_f32 * 2];
+                        loop {
+                            let c = next_chunk.fetch_add(1, Ordering::Relaxed);
+                            if c >= num_chunks {
+                                break;
+                            }
+                            let lo = c * CHUNK_BLOCKS;
+                            let hi = (lo + CHUNK_BLOCKS).min(block_count);
+                            let payload = decode_chunk_pcm(DecodeChunkArgs {
+                                hca: &mut hca,
+                                data,
+                                lo,
+                                hi,
+                                block_size,
+                                channels,
+                                samples_per_block,
+                                delay,
+                                total_valid,
+                                block: &mut block,
+                                dct: &mut dct,
+                                prev: &mut prev,
+                                wave: &mut wave,
+                                pcm: &mut pcm,
+                                scratch: &mut scratch,
+                            });
+                            if tx.send((c, payload)).is_err() {
+                                break; // writer bailed out
+                            }
+                        }
+                    })
+                    .expect("spawn HCA decode worker");
+            }
+            drop(tx);
+
+            // Writer: emit chunk byte payloads strictly in order.
+            let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+            for expect in 0..num_chunks {
+                let bytes = loop {
+                    if let Some(bytes) = pending.remove(&expect) {
+                        break bytes;
+                    }
+                    // Channel can only disconnect early if a worker panicked.
+                    let (c, payload) = rx
+                        .recv()
+                        .map_err(|_| HcaDecoderError::Hca(HcaError::InvalidParams))?;
+                    let bytes = payload?;
+                    if c == expect {
+                        break bytes;
+                    }
+                    pending.insert(c, bytes);
+                };
+                w.write_all(&bytes)?;
+            }
+            Ok(())
+        })?;
+
+        self.current_block = self.info.block_count;
+        self.samples_written = total_valid;
+        let total_frames = self.info.block_count as u64 * samples_per_block as u64;
+        self.current_delay = delay.saturating_sub(total_frames) as i32;
 
         if !smpl_chunk.is_empty() {
             w.write_all(&smpl_chunk)?;
@@ -465,6 +638,105 @@ impl<R: Read + Seek> HcaDecoder<R> {
         }
         c
     }
+}
+
+/// Scratch and parameters for `decode_chunk_pcm`, grouped so the worker loop
+/// reuses all buffers across chunks.
+struct DecodeChunkArgs<'a> {
+    hca: &'a mut ClHca,
+    data: &'a [u8],
+    lo: usize,
+    hi: usize,
+    block_size: usize,
+    channels: usize,
+    samples_per_block: usize,
+    /// encoder_delay in sample frames.
+    delay: u64,
+    /// Total valid sample frames in the whole file.
+    total_valid: u64,
+    block: &'a mut [u8],
+    dct: &'a mut [f32],
+    prev: &'a mut [[f32; 128]],
+    wave: &'a mut [f32; 128],
+    pcm: &'a mut [i16],
+    scratch: &'a mut [u8],
+}
+
+/// Decode blocks `lo..hi` to final interleaved 16-bit PCM (LE bytes), with
+/// encoder delay/padding trimmed. Fully independent of other chunks: the IMDCT
+/// overlap state is a pure function of the preceding subframe's DCT output, so
+/// it is seeded by decoding block `lo - 1` (zeros at file start).
+fn decode_chunk_pcm(a: DecodeChunkArgs<'_>) -> Result<Vec<u8>, HcaError> {
+    let spb = a.samples_per_block;
+    let frame_f32 = a.channels * spb;
+    let mut bytes = Vec::with_capacity((a.hi - a.lo) * frame_f32 * 2);
+
+    // Seed the overlap state.
+    if a.lo == 0 {
+        for p in a.prev.iter_mut() {
+            p.fill(0.0);
+        }
+    } else {
+        let b = a.lo - 1;
+        a.block
+            .copy_from_slice(&a.data[b * a.block_size..(b + 1) * a.block_size]);
+        a.hca.decode_block_dct(a.block, a.dct)?;
+        for (ch, prev_ch) in a.prev.iter_mut().enumerate() {
+            let last = &a.dct[ch * spb + (HCA_SUBFRAMES - 1) * 128..][..128];
+            // imdct_overlap's `previous` output depends only on `dct`.
+            imdct_overlap(last.try_into().unwrap(), prev_ch, a.wave);
+        }
+    }
+
+    let mut wave2 = [0f32; 128];
+    for b in a.lo..a.hi {
+        a.block
+            .copy_from_slice(&a.data[b * a.block_size..(b + 1) * a.block_size]);
+        a.hca.decode_block_dct(a.block, a.dct)?;
+        for sf in 0..HCA_SUBFRAMES {
+            if a.channels == 2 {
+                // Stereo: overlap both channels, then a pairwise interleave
+                // that the compiler can vectorize (no strided stores).
+                let dct0: &[f32; 128] = a.dct[sf * 128..][..128].try_into().unwrap();
+                let dct1: &[f32; 128] = a.dct[spb + sf * 128..][..128].try_into().unwrap();
+                imdct_overlap(dct0, &mut a.prev[0], a.wave);
+                imdct_overlap(dct1, &mut a.prev[1], &mut wave2);
+                let out = &mut a.pcm[sf * 256..(sf + 1) * 256];
+                for (pair, (&l, &r)) in out.chunks_exact_mut(2).zip(a.wave.iter().zip(wave2.iter()))
+                {
+                    pair[0] = pcm_f32_to_i16(l);
+                    pair[1] = pcm_f32_to_i16(r);
+                }
+            } else {
+                for (ch, prev_ch) in a.prev.iter_mut().enumerate() {
+                    let dct: &[f32; 128] = a.dct[ch * spb + sf * 128..][..128].try_into().unwrap();
+                    imdct_overlap(dct, prev_ch, a.wave);
+                    let base = sf * 128 * a.channels + ch;
+                    for (j, &v) in a.wave.iter().enumerate() {
+                        a.pcm[base + j * a.channels] = pcm_f32_to_i16(v);
+                    }
+                }
+            }
+        }
+
+        // Static delay/padding trim: this block covers pre-trim sample frames
+        // [b*spb, (b+1)*spb); the valid output range is [delay, delay+total_valid).
+        let block_start = b as u64 * spb as u64;
+        let keep_lo = a.delay.saturating_sub(block_start).min(spb as u64) as usize;
+        let keep_hi = (a.delay + a.total_valid)
+            .saturating_sub(block_start)
+            .min(spb as u64) as usize;
+        if keep_hi > keep_lo {
+            // Writing into a Vec<u8> cannot fail.
+            write_pcm_i16_le(
+                &mut bytes,
+                &a.pcm[keep_lo * a.channels..keep_hi * a.channels],
+                a.scratch,
+            )
+            .expect("Vec write");
+        }
+    }
+    Ok(bytes)
 }
 
 #[cfg(target_endian = "little")]
