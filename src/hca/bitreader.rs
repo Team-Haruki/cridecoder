@@ -145,6 +145,13 @@ impl<'a> BitReader<'a> {
         self.position += bits;
     }
 
+    /// Start a register-resident forward-only accumulator at the current
+    /// position. Call `BitAcc::sync` to write the consumed count back.
+    #[inline]
+    pub(crate) fn acc(&self) -> BitAcc<'a> {
+        BitAcc::new(self.data, self.position)
+    }
+
     /// Advance the position by a signed amount, saturating at zero. Used by the
     /// HCA dequantizer where prefix-codebook adjustments may be negative.
     #[inline]
@@ -262,6 +269,72 @@ impl BitWriter {
 
     pub fn into_vec(self) -> Vec<u8> {
         self.data
+    }
+}
+
+/// Register-resident, forward-only bit accumulator over a byte slice.
+///
+/// MSB-first: valid bits live in the high end of `acc`, unfilled low bits are
+/// zero, which reproduces `BitReader`'s zero-padding-past-EOF semantics.
+/// Keeping the next bits in a u64 avoids the per-read memory reload and bounds
+/// machinery that `BitReader::read` incurs, so tight unpack loops stay in
+/// registers. Reads must be <= 32 bits.
+pub(crate) struct BitAcc<'a> {
+    data: &'a [u8],
+    byte_pos: usize,
+    acc: u64,
+    nbits: u32,
+    /// Bits consumed relative to `base` (the starting bit position).
+    consumed: usize,
+    base: usize,
+}
+
+impl<'a> BitAcc<'a> {
+    #[inline]
+    fn new(data: &'a [u8], start: usize) -> Self {
+        let mut s = Self {
+            data,
+            byte_pos: start >> 3,
+            acc: 0,
+            nbits: 0,
+            consumed: 0,
+            base: start,
+        };
+        s.refill();
+        // Drop the already-consumed bits in the leading byte.
+        let lead = (start & 7) as u32;
+        s.acc <<= lead;
+        s.nbits = s.nbits.saturating_sub(lead);
+        s
+    }
+
+    #[inline]
+    fn refill(&mut self) {
+        while self.nbits <= 56 && self.byte_pos < self.data.len() {
+            self.acc |= (self.data[self.byte_pos] as u64) << (56 - self.nbits);
+            self.nbits += 8;
+            self.byte_pos += 1;
+        }
+    }
+
+    /// Read `bits` (1..=32) and advance. Reads past EOF yield zero bits.
+    #[inline(always)]
+    pub fn read(&mut self, bits: u32) -> u32 {
+        debug_assert!((1..=32).contains(&bits));
+        if self.nbits < 32 {
+            self.refill();
+        }
+        let value = (self.acc >> (64 - bits)) as u32;
+        self.acc <<= bits;
+        self.nbits = self.nbits.saturating_sub(bits);
+        self.consumed += bits as usize;
+        value
+    }
+
+    /// Write the consumed bit count back to the reader this was forked from.
+    #[inline]
+    pub fn sync(&self, br: &mut BitReader<'_>) {
+        br.set_position(self.base + self.consumed);
     }
 }
 

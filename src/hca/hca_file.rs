@@ -32,6 +32,13 @@ pub struct HcaDecoder<R: Read + Seek> {
     // few decoders in one stack frame overflow a 2 MB thread stack.
     handle: Box<ClHca>,
     buf: Vec<u8>,
+    /// Multi-block read-ahead buffer: sequential decoding otherwise issues one
+    /// tiny read syscall per block (~4% of decode time on macOS).
+    chunk: Vec<u8>,
+    /// First block held in `chunk`; `u32::MAX` marks the buffer invalid.
+    chunk_first: u32,
+    /// Number of blocks held in `chunk`.
+    chunk_blocks: u32,
     fbuf: Vec<f32>,
     current_delay: i32,
     current_block: u32,
@@ -87,6 +94,9 @@ impl<R: Read + Seek> HcaDecoder<R> {
             info,
             handle,
             buf,
+            chunk: Vec::new(),
+            chunk_first: u32::MAX,
+            chunk_blocks: 0,
             fbuf,
             current_delay,
             current_block: 0,
@@ -128,21 +138,37 @@ impl<R: Read + Seek> HcaDecoder<R> {
         self.handle.set_key(key);
     }
 
-    /// Read a single HCA frame/block
+    /// Read a single HCA frame/block, served from the read-ahead chunk buffer.
     fn read_packet(&mut self) -> Result<(), HcaDecoderError> {
         if self.current_block >= self.info.block_count {
             return Err(HcaDecoderError::Eof);
         }
 
-        let offset =
-            self.info.header_size as u64 + self.current_block as u64 * self.info.block_size as u64;
-        if self.reader_offset != Some(offset) {
-            self.reader.seek(SeekFrom::Start(offset))?;
+        let block_size = self.info.block_size as usize;
+        let in_chunk = self.current_block >= self.chunk_first
+            && self.current_block - self.chunk_first < self.chunk_blocks;
+        if !in_chunk {
+            // Refill: read up to ~1 MiB of consecutive blocks in one syscall.
+            let max_blocks = ((1 << 20) / block_size).clamp(1, 4096) as u32;
+            let want = max_blocks.min(self.info.block_count - self.current_block);
+            let offset = self.info.header_size as u64
+                + self.current_block as u64 * self.info.block_size as u64;
+            if self.reader_offset != Some(offset) {
+                self.reader.seek(SeekFrom::Start(offset))?;
+            }
+            self.chunk.resize(want as usize * block_size, 0);
+            self.chunk_first = u32::MAX;
+            self.chunk_blocks = 0;
+            self.reader_offset = None;
+            self.reader.read_exact(&mut self.chunk)?;
+            self.reader_offset = Some(offset + self.chunk.len() as u64);
+            self.chunk_first = self.current_block;
+            self.chunk_blocks = want;
         }
-        self.reader.read_exact(&mut self.buf)?;
 
+        let idx = (self.current_block - self.chunk_first) as usize * block_size;
+        self.buf.copy_from_slice(&self.chunk[idx..idx + block_size]);
         self.current_block += 1;
-        self.reader_offset = Some(offset + self.info.block_size as u64);
         Ok(())
     }
 

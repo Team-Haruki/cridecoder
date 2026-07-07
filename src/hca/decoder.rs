@@ -6,7 +6,7 @@ use crate::hca::cipher::{cipher_decrypt, cipher_init};
 use crate::hca::imdct::imdct_transform;
 use crate::hca::tables::{
     DEQUANTIZER_RANGE_TABLE, DEQUANTIZER_SCALING_TABLE, INTENSITY_RATIO_TABLE, INVERT_TABLE,
-    MAX_BIT_TABLE, READ_BIT_TABLE, READ_VAL_TABLE, SCALE_CONVERSION_TABLE,
+    MAX_BIT_TABLE, READ_VAL_TABLE, SCALE_CONVERSION_TABLE,
 };
 use thiserror::Error;
 
@@ -236,6 +236,14 @@ fn header_ceil2(a: u32, b: u32) -> u32 {
     }
     result
 }
+
+/// Consumed-bit-count model for `dequantize_coefficients`: every
+/// READ_BIT_TABLE row is "the first DEQ_USED_THRESH[res] codes take
+/// DEQ_USED_BASE[res] bits, the rest take one more", and sign-magnitude
+/// resolutions (8..=15) consume MAX_BIT_TABLE[res]-1 bits when the magnitude
+/// is 0 (code < 2). Equivalence with READ_BIT_TABLE is asserted in tests.
+const DEQ_USED_BASE: [u8; 16] = [0, 1, 2, 2, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+const DEQ_USED_THRESH: [u8; 16] = [1, 2, 6, 2, 14, 10, 6, 2, 2, 2, 2, 2, 2, 2, 2, 2];
 
 /// Main HCA decoder structure
 pub struct ClHca {
@@ -1029,7 +1037,10 @@ impl ClHca {
         let mut cs_count = channel.coded_count;
         let extra_count: usize;
 
-        let delta_bits = br.read(3) as u8;
+        // Register-resident accumulator (see BitAcc): the delta decode below
+        // otherwise pays BitReader's per-read reload for every coefficient.
+        let mut acc = br.acc();
+        let delta_bits = acc.read(3) as u8;
 
         if channel.channel_type == ChannelType::StereoSecondary
             || self.hfr_group_count == 0
@@ -1048,19 +1059,19 @@ impl ClHca {
         if delta_bits >= 6 {
             // Fixed scale factors
             for i in 0..cs_count {
-                channel.scale_factors[i] = br.read(6) as u8;
+                channel.scale_factors[i] = acc.read(6) as u8;
             }
         } else if delta_bits > 0 {
             // Delta scale factors
             let expected_delta = ((1 << delta_bits) - 1) as u8;
-            let mut value = br.read(6) as u8;
+            let mut value = acc.read(6) as u8;
 
             channel.scale_factors[0] = value;
             for i in 1..cs_count {
-                let delta = br.read(delta_bits as usize) as u8;
+                let delta = acc.read(delta_bits as u32) as u8;
 
                 if delta == expected_delta {
-                    value = br.read(6) as u8;
+                    value = acc.read(6) as u8;
                 } else {
                     let scalefactor_test =
                         value as i32 + (delta as i32 - (expected_delta >> 1) as i32);
@@ -1077,6 +1088,7 @@ impl ClHca {
             // No scale factors
             channel.scale_factors[..HCA_SAMPLES_PER_SUBFRAME].fill(0);
         }
+        acc.sync(br);
 
         // Set derived HFR scales for v3.0
         for i in 0..extra_count {
@@ -1264,17 +1276,19 @@ impl ClHca {
                 (acc >> (64 - bits)) as u32
             };
 
-            // `used` is the actual prefix length consumed: prefix codebooks
-            // (res <= 7) may be shorter than the fixed width; sign-magnitude
-            // resolutions consume one fewer bit when the value is zero.
-            let (qc, used): (f32, u32) = if res <= 7 {
-                let index = ((res as usize) << 4) + code as usize;
-                (READ_VAL_TABLE[index], READ_BIT_TABLE[index] as u32)
+            // `used` is the actual prefix length consumed, computed
+            // arithmetically (see DEQ_USED_BASE) instead of via a table load.
+            // This keeps the loop-carried chain (acc -> code -> used -> acc)
+            // in registers; the value lookup stays a load but is off that
+            // chain.
+            let used = DEQ_USED_BASE[res as usize] as u32
+                + (code >= DEQ_USED_THRESH[res as usize] as u32) as u32;
+
+            let qc: f32 = if res <= 7 {
+                READ_VAL_TABLE[((res as usize) << 4) + code as usize]
             } else {
                 // Sign-magnitude: bit 0 is sign, bits 1+ are magnitude.
-                let signed_code = (1 - ((code & 1) << 1) as i32) * (code >> 1) as i32;
-                let used = if signed_code == 0 { bits - 1 } else { bits };
-                (signed_code as f32, used)
+                ((1 - ((code & 1) << 1) as i32) * (code >> 1) as i32) as f32
             };
 
             acc <<= used;
@@ -1493,6 +1507,33 @@ mod tests {
         assert_eq!(hca.channels, 0);
         assert_eq!(hca.random, HCA_DEFAULT_RANDOM);
         assert_eq!(hca.rva_volume, 1.0);
+    }
+
+    #[test]
+    fn test_deq_used_matches_read_bit_table() {
+        use crate::hca::tables::READ_BIT_TABLE;
+
+        // Prefix resolutions (0..=7): the arithmetic model must reproduce
+        // READ_BIT_TABLE for every fixed-width code.
+        for res in 0..=7usize {
+            let bits = MAX_BIT_TABLE[res] as u32;
+            for code in 0..(1u32 << bits) {
+                let expect = READ_BIT_TABLE[(res << 4) + code as usize] as u32;
+                let got = DEQ_USED_BASE[res] as u32
+                    + (code >= DEQ_USED_THRESH[res] as u32) as u32;
+                assert_eq!(got, expect, "res {res} code {code}");
+            }
+        }
+        // Sign-magnitude resolutions (8..=15): bits-1 when magnitude is 0.
+        for res in 8..16usize {
+            let bits = MAX_BIT_TABLE[res] as u32;
+            for code in 0..(1u32 << bits) {
+                let expect = if code >> 1 == 0 { bits - 1 } else { bits };
+                let got = DEQ_USED_BASE[res] as u32
+                    + (code >= DEQ_USED_THRESH[res] as u32) as u32;
+                assert_eq!(got, expect, "res {res} code {code}");
+            }
+        }
     }
 
     #[test]
