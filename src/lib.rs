@@ -15,7 +15,9 @@ mod python;
 
 // ACB/AWB exports
 pub use acb::{
-    decode_acb_to_wav, decode_acb_to_wav_from_file, decode_acb_to_wav_to_memory, DecodeAcbError,
+    decode_acb_to_wav, decode_acb_to_wav_from_file, decode_acb_to_wav_from_file_parallel,
+    decode_acb_to_wav_parallel, decode_acb_to_wav_to_memory,
+    decode_acb_to_wav_to_memory_parallel, DecodeAcbError,
     DecodedAcbTrack,
 };
 pub use acb::{

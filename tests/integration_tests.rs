@@ -445,6 +445,51 @@ fn test_usm_from_memory() {
 // Encoder Tests
 // =============================================================================
 
+/// Parallel ACB decode must produce output identical to the serial path.
+#[test]
+fn test_acb_parallel_decode_matches_serial() {
+    use cridecoder::{
+        decode_acb_to_wav_to_memory, decode_acb_to_wav_to_memory_parallel, AcbBuilder,
+        HcaEncoder, HcaEncoderConfig, TrackInput,
+    };
+
+    // Build an ACB with three real encoded HCA tracks of different lengths.
+    let mut builder = AcbBuilder::new();
+    for (i, seconds) in [1usize, 2, 3].iter().enumerate() {
+        let sample_count = 48000 * seconds;
+        let mut samples = Vec::with_capacity(sample_count * 2);
+        for j in 0..sample_count {
+            let t = j as f32 / 48000.0;
+            let v = (2.0 * std::f32::consts::PI * (150.0 * (i + 1) as f32) * t).sin() * 0.4;
+            samples.push(v);
+            samples.push(v * 0.5);
+        }
+        let config = HcaEncoderConfig {
+            channels: 2,
+            sample_rate: 48000,
+            bitrate: 192_000,
+            ..Default::default()
+        };
+        let mut encoder = HcaEncoder::new(config).unwrap();
+        let mut hca = Vec::new();
+        encoder.encode(&samples, &mut Cursor::new(&mut hca)).unwrap();
+        builder.add_track(TrackInput::new(format!("track_{i}"), i as u32, hca));
+    }
+    let mut acb = Vec::new();
+    builder.build(&mut Cursor::new(&mut acb), None).unwrap();
+
+    let serial = decode_acb_to_wav_to_memory(Cursor::new(&acb), None, None).unwrap();
+    for threads in [2, 8] {
+        let parallel =
+            decode_acb_to_wav_to_memory_parallel(Cursor::new(&acb), None, None, threads).unwrap();
+        assert_eq!(serial.len(), parallel.len());
+        for (a, b) in serial.iter().zip(parallel.iter()) {
+            assert_eq!(a.name, b.name, "{threads} threads");
+            assert!(a.data == b.data, "track {} differs ({threads} threads)", a.name);
+        }
+    }
+}
+
 /// Parallel WAV decode must be byte-identical to the serial path.
 #[test]
 fn test_hca_parallel_decode_matches_serial() {
