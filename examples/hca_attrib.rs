@@ -20,8 +20,12 @@ fn main() {
     );
     println!(
         "version={:#x} min_res={} max_res={} stereo_bands={} hfr_bands_per_group={} ms_stereo={}",
-        hca.version, hca.min_resolution, hca.max_resolution, hca.stereo_band_count,
-        hca.bands_per_hfr_group, hca.ms_stereo
+        hca.version,
+        hca.min_resolution,
+        hca.max_resolution,
+        hca.stereo_band_count,
+        hca.bands_per_hfr_group,
+        hca.ms_stereo
     );
 
     let hs = info.header_size as usize;

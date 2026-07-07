@@ -449,8 +449,8 @@ fn test_usm_from_memory() {
 #[test]
 fn test_acb_parallel_decode_matches_serial() {
     use cridecoder::{
-        decode_acb_to_wav_to_memory, decode_acb_to_wav_to_memory_parallel, AcbBuilder,
-        HcaEncoder, HcaEncoderConfig, TrackInput,
+        decode_acb_to_wav_to_memory, decode_acb_to_wav_to_memory_parallel, AcbBuilder, HcaEncoder,
+        HcaEncoderConfig, TrackInput,
     };
 
     // Build an ACB with three real encoded HCA tracks of different lengths.
@@ -472,7 +472,9 @@ fn test_acb_parallel_decode_matches_serial() {
         };
         let mut encoder = HcaEncoder::new(config).unwrap();
         let mut hca = Vec::new();
-        encoder.encode(&samples, &mut Cursor::new(&mut hca)).unwrap();
+        encoder
+            .encode(&samples, &mut Cursor::new(&mut hca))
+            .unwrap();
         builder.add_track(TrackInput::new(format!("track_{i}"), i as u32, hca));
     }
     let mut acb = Vec::new();
@@ -485,7 +487,11 @@ fn test_acb_parallel_decode_matches_serial() {
         assert_eq!(serial.len(), parallel.len());
         for (a, b) in serial.iter().zip(parallel.iter()) {
             assert_eq!(a.name, b.name, "{threads} threads");
-            assert!(a.data == b.data, "track {} differs ({threads} threads)", a.name);
+            assert!(
+                a.data == b.data,
+                "track {} differs ({threads} threads)",
+                a.name
+            );
         }
     }
 }

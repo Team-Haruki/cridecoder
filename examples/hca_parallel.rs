@@ -8,7 +8,9 @@ fn main() {
     let hca_file = args.get(1).map(|s| s.as_str()).unwrap_or("music_5031.hca");
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
     let threads: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
     });
 
     // Correctness: byte-identical WAV output.
@@ -18,7 +20,8 @@ fn main() {
         let mut d = HcaDecoder::from_file(hca_file).unwrap();
         d.decode_to_wav(&mut serial_out).unwrap();
         let mut d = HcaDecoder::from_file(hca_file).unwrap();
-        d.decode_to_wav_parallel(&mut parallel_out, threads).unwrap();
+        d.decode_to_wav_parallel(&mut parallel_out, threads)
+            .unwrap();
     }
     assert_eq!(serial_out.len(), parallel_out.len(), "length mismatch");
     assert!(serial_out == parallel_out, "WAV bytes differ");

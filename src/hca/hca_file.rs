@@ -501,7 +501,8 @@ impl<R: Read + Seek> HcaDecoder<R> {
 
         // Load the whole audio region; workers slice blocks out of it.
         let mut data = vec![0u8; block_count * block_size];
-        self.reader.seek(SeekFrom::Start(self.info.header_size as u64))?;
+        self.reader
+            .seek(SeekFrom::Start(self.info.header_size as u64))?;
         self.reader_offset = None;
         self.reader.read_exact(&mut data)?;
 
@@ -540,24 +541,23 @@ impl<R: Read + Seek> HcaDecoder<R> {
                         }
                         let lo = c * CHUNK_BLOCKS;
                         let hi = (lo + CHUNK_BLOCKS).min(block_count);
-                        let payload =
-                            decode_chunk_pcm(DecodeChunkArgs {
-                                hca: &mut hca,
-                                data,
-                                lo,
-                                hi,
-                                block_size,
-                                channels,
-                                samples_per_block,
-                                delay,
-                                total_valid,
-                                block: &mut block,
-                                dct: &mut dct,
-                                prev: &mut prev,
-                                wave: &mut wave,
-                                pcm: &mut pcm,
-                                scratch: &mut scratch,
-                            });
+                        let payload = decode_chunk_pcm(DecodeChunkArgs {
+                            hca: &mut hca,
+                            data,
+                            lo,
+                            hi,
+                            block_size,
+                            channels,
+                            samples_per_block,
+                            delay,
+                            total_valid,
+                            block: &mut block,
+                            dct: &mut dct,
+                            prev: &mut prev,
+                            wave: &mut wave,
+                            pcm: &mut pcm,
+                            scratch: &mut scratch,
+                        });
                         if tx.send((c, payload)).is_err() {
                             break; // writer bailed out
                         }
@@ -695,9 +695,7 @@ fn decode_chunk_pcm(a: DecodeChunkArgs<'_>) -> Result<Vec<u8>, HcaError> {
                 imdct_overlap(dct0, &mut a.prev[0], a.wave);
                 imdct_overlap(dct1, &mut a.prev[1], &mut wave2);
                 let out = &mut a.pcm[sf * 256..(sf + 1) * 256];
-                for (pair, (&l, &r)) in out
-                    .chunks_exact_mut(2)
-                    .zip(a.wave.iter().zip(wave2.iter()))
+                for (pair, (&l, &r)) in out.chunks_exact_mut(2).zip(a.wave.iter().zip(wave2.iter()))
                 {
                     pair[0] = pcm_f32_to_i16(l);
                     pair[1] = pcm_f32_to_i16(r);

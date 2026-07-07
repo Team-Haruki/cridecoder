@@ -1029,7 +1029,8 @@ impl ClHca {
                 .take(channels)
             {
                 crate::hca::imdct::imdct_dct(&mut self.channel[ch], subframe);
-                chunk[subframe * HCA_SAMPLES_PER_SUBFRAME..(subframe + 1) * HCA_SAMPLES_PER_SUBFRAME]
+                chunk[subframe * HCA_SAMPLES_PER_SUBFRAME
+                    ..(subframe + 1) * HCA_SAMPLES_PER_SUBFRAME]
                     .copy_from_slice(&self.channel[ch].spectra[subframe]);
             }
         }
@@ -1573,8 +1574,7 @@ mod tests {
             let bits = MAX_BIT_TABLE[res] as u32;
             for code in 0..(1u32 << bits) {
                 let expect = READ_BIT_TABLE[(res << 4) + code as usize] as u32;
-                let got = DEQ_USED_BASE[res] as u32
-                    + (code >= DEQ_USED_THRESH[res] as u32) as u32;
+                let got = DEQ_USED_BASE[res] as u32 + (code >= DEQ_USED_THRESH[res] as u32) as u32;
                 assert_eq!(got, expect, "res {res} code {code}");
             }
         }
@@ -1583,8 +1583,7 @@ mod tests {
             let bits = MAX_BIT_TABLE[res] as u32;
             for code in 0..(1u32 << bits) {
                 let expect = if code >> 1 == 0 { bits - 1 } else { bits };
-                let got = DEQ_USED_BASE[res] as u32
-                    + (code >= DEQ_USED_THRESH[res] as u32) as u32;
+                let got = DEQ_USED_BASE[res] as u32 + (code >= DEQ_USED_THRESH[res] as u32) as u32;
                 assert_eq!(got, expect, "res {res} code {code}");
             }
         }

@@ -15,9 +15,8 @@ pub use builder::{
 pub use consts::*;
 pub use decode::{
     decode_acb_to_wav, decode_acb_to_wav_from_file, decode_acb_to_wav_from_file_parallel,
-    decode_acb_to_wav_parallel, decode_acb_to_wav_to_memory,
-    decode_acb_to_wav_to_memory_parallel, DecodeAcbError,
-    DecodedAcbTrack,
+    decode_acb_to_wav_parallel, decode_acb_to_wav_to_memory, decode_acb_to_wav_to_memory_parallel,
+    DecodeAcbError, DecodedAcbTrack,
 };
 pub use extractor::{
     extract_acb, extract_acb_from_file, extract_acb_to_memory, extract_acb_tracks,

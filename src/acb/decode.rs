@@ -12,7 +12,9 @@ use std::sync::Mutex;
 
 use thiserror::Error;
 
-use crate::acb::extractor::{extract_acb_to_memory, read_validated_acb, ExtractedAcbTrack, ExtractError};
+use crate::acb::extractor::{
+    extract_acb_to_memory, read_validated_acb, ExtractError, ExtractedAcbTrack,
+};
 use crate::hca::{HcaDecoder, HcaDecoderError};
 
 /// A decoded ACB track held in memory.

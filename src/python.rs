@@ -108,8 +108,10 @@ fn decode_acb_to_wav(
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create output dir: {}", e)))?;
 
     let threads = resolve_threads(threads);
-    py.detach(|| acb::decode_acb_to_wav_from_file_parallel(Path::new(acb_path), out_dir, key, threads))
-        .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))
+    py.detach(|| {
+        acb::decode_acb_to_wav_from_file_parallel(Path::new(acb_path), out_dir, key, threads)
+    })
+    .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))
 }
 
 /// Extract audio tracks from in-memory ACB bytes (no disk I/O).
@@ -207,7 +209,9 @@ fn decode_acb_to_wav_bytes<'py>(
 ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
     let threads = resolve_threads(threads);
     let tracks = py
-        .detach(|| acb::decode_acb_to_wav_to_memory_parallel(Cursor::new(acb_data), None, key, threads))
+        .detach(|| {
+            acb::decode_acb_to_wav_to_memory_parallel(Cursor::new(acb_data), None, key, threads)
+        })
         .map_err(|e| PyRuntimeError::new_err(format!("ACB decode failed: {}", e)))?;
 
     let mut out = Vec::with_capacity(tracks.len());
