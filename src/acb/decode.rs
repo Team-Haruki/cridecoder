@@ -95,13 +95,20 @@ pub fn decode_acb_to_wav_to_memory_parallel<R: Read + Seek>(
         for _ in 0..workers {
             let queue = &queue;
             let slot_results = &slot_results;
-            scope.spawn(move || loop {
-                let Some((idx, track)) = queue.lock().unwrap().pop_front() else {
-                    break;
-                };
-                let result = decode_one_track(track, key, per_track_threads);
-                **slot_results[idx].lock().unwrap() = Some(result);
-            });
+            // Explicit stack size: track workers clone ClHca (~170 KiB) and
+            // spawn nested block-decode workers; the 2 MiB spawn default
+            // (absent RUST_MIN_STACK) overflows on some targets in debug.
+            std::thread::Builder::new()
+                .name("acb-decode".into())
+                .stack_size(8 << 20)
+                .spawn_scoped(scope, move || loop {
+                    let Some((idx, track)) = queue.lock().unwrap().pop_front() else {
+                        break;
+                    };
+                    let result = decode_one_track(track, key, per_track_threads);
+                    **slot_results[idx].lock().unwrap() = Some(result);
+                })
+                .expect("spawn ACB decode worker");
         }
     });
     drop(slot_results);

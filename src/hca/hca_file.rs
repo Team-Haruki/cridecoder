@@ -527,42 +527,49 @@ impl<R: Read + Seek> HcaDecoder<R> {
                 let next_chunk = &next_chunk;
                 let data = &data[..];
                 let mut hca = template.clone();
-                scope.spawn(move || {
-                    let mut block = vec![0u8; block_size];
-                    let mut dct = vec![0f32; frame_f32];
-                    let mut prev = vec![[0f32; 128]; channels];
-                    let mut wave = [0f32; 128];
-                    let mut pcm = vec![0i16; frame_f32];
-                    let mut scratch = vec![0u8; frame_f32 * 2];
-                    loop {
-                        let c = next_chunk.fetch_add(1, Ordering::Relaxed);
-                        if c >= num_chunks {
-                            break;
+                // Explicit stack size: ClHca is ~170 KiB and debug-build
+                // frames are large; the 2 MiB spawn default (absent
+                // RUST_MIN_STACK) overflows on some targets.
+                std::thread::Builder::new()
+                    .name("hca-decode".into())
+                    .stack_size(8 << 20)
+                    .spawn_scoped(scope, move || {
+                        let mut block = vec![0u8; block_size];
+                        let mut dct = vec![0f32; frame_f32];
+                        let mut prev = vec![[0f32; 128]; channels];
+                        let mut wave = [0f32; 128];
+                        let mut pcm = vec![0i16; frame_f32];
+                        let mut scratch = vec![0u8; frame_f32 * 2];
+                        loop {
+                            let c = next_chunk.fetch_add(1, Ordering::Relaxed);
+                            if c >= num_chunks {
+                                break;
+                            }
+                            let lo = c * CHUNK_BLOCKS;
+                            let hi = (lo + CHUNK_BLOCKS).min(block_count);
+                            let payload = decode_chunk_pcm(DecodeChunkArgs {
+                                hca: &mut hca,
+                                data,
+                                lo,
+                                hi,
+                                block_size,
+                                channels,
+                                samples_per_block,
+                                delay,
+                                total_valid,
+                                block: &mut block,
+                                dct: &mut dct,
+                                prev: &mut prev,
+                                wave: &mut wave,
+                                pcm: &mut pcm,
+                                scratch: &mut scratch,
+                            });
+                            if tx.send((c, payload)).is_err() {
+                                break; // writer bailed out
+                            }
                         }
-                        let lo = c * CHUNK_BLOCKS;
-                        let hi = (lo + CHUNK_BLOCKS).min(block_count);
-                        let payload = decode_chunk_pcm(DecodeChunkArgs {
-                            hca: &mut hca,
-                            data,
-                            lo,
-                            hi,
-                            block_size,
-                            channels,
-                            samples_per_block,
-                            delay,
-                            total_valid,
-                            block: &mut block,
-                            dct: &mut dct,
-                            prev: &mut prev,
-                            wave: &mut wave,
-                            pcm: &mut pcm,
-                            scratch: &mut scratch,
-                        });
-                        if tx.send((c, payload)).is_err() {
-                            break; // writer bailed out
-                        }
-                    }
-                });
+                    })
+                    .expect("spawn HCA decode worker");
             }
             drop(tx);
 
