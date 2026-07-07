@@ -71,19 +71,26 @@ def extract_acb_unique_bytes(acb_data: bytes) -> list[dict[str, object]]:
     ...
 
 def decode_acb_to_wav(
-    acb_path: str, output_dir: str, key: Optional[int] = ...
+    acb_path: str,
+    output_dir: str,
+    key: Optional[int] = ...,
+    threads: Optional[int] = ...,
 ) -> list[str]:
     """Extract an ACB and decode its HCA tracks straight to WAV files.
 
     The per-AWB AFS2 subkey is applied automatically, so encrypted (type-56)
     ACBs only need the global ``key`` (omit/``None`` for unencrypted ACBs).
-    Non-HCA tracks are written verbatim with their original extension. Returns
+    Non-HCA tracks are written verbatim with their original extension.
+    ``threads`` selects multithreaded decoding (``None`` = serial, ``0`` = all
+    CPU cores, ``N`` = N threads); output is identical regardless. Returns
     the list of written file paths.
     """
     ...
 
 def decode_acb_to_wav_bytes(
-    acb_data: bytes, key: Optional[int] = ...
+    acb_data: bytes,
+    key: Optional[int] = ...,
+    threads: Optional[int] = ...,
 ) -> list[dict[str, object]]:
     """In-memory counterpart of :func:`decode_acb_to_wav` (no disk I/O).
 
@@ -134,11 +141,14 @@ def decode_hca(
     wav_path: str,
     key: Optional[int] = ...,
     subkey: Optional[int] = ...,
+    threads: Optional[int] = ...,
 ) -> dict[str, int]:
     """Decode an HCA file to a WAV file.
 
     ``key``/``subkey`` apply the type-56 decryption keycode for encrypted HCA
-    (no-op for unencrypted files). Returns a dict with ``sample_rate``,
+    (no-op for unencrypted files). ``threads`` selects multithreaded decoding:
+    ``None`` decodes serially, ``0`` uses all CPU cores, ``N`` uses N threads;
+    output is byte-identical regardless. Returns a dict with ``sample_rate``,
     ``channels``, ``block_count``, ``block_size``, ``encoder_delay`` and
     ``samples_per_block``.
     """
@@ -148,8 +158,9 @@ def decode_hca_bytes(
     hca_data: bytes,
     key: Optional[int] = ...,
     subkey: Optional[int] = ...,
+    threads: Optional[int] = ...,
 ) -> bytes:
-    """Decode HCA bytes to WAV bytes in memory (``key``/``subkey`` as in :func:`decode_hca`)."""
+    """Decode HCA bytes to WAV bytes in memory (``key``/``subkey``/``threads`` as in :func:`decode_hca`)."""
     ...
 
 def encode_hca_bytes(
