@@ -74,6 +74,20 @@ impl<R: Read + Seek> Reader<R> {
         Ok(buf)
     }
 
+    /// Append exactly `n` bytes from the current position to `out`, reading
+    /// directly into the vector's tail (no intermediate allocation or copy).
+    pub fn read_into_vec(&mut self, n: usize, out: &mut Vec<u8>) -> io::Result<()> {
+        let start = out.len();
+        out.resize(start + n, 0);
+        match self.inner.read_exact(&mut out[start..]) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                out.truncate(start);
+                Err(e)
+            }
+        }
+    }
+
     /// Copy exactly `n` bytes from the current position to a writer.
     pub fn copy_to_writer<W: Write>(&mut self, n: u64, writer: &mut W) -> io::Result<u64> {
         let mut limited = self.inner.by_ref().take(n);
