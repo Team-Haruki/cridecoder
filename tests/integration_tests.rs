@@ -445,6 +445,53 @@ fn test_usm_from_memory() {
 // Encoder Tests
 // =============================================================================
 
+/// Parallel WAV decode must be byte-identical to the serial path.
+#[test]
+fn test_hca_parallel_decode_matches_serial() {
+    use cridecoder::{HcaDecoder, HcaEncoder, HcaEncoderConfig};
+
+    // Synthesize a stereo HCA (sine sweep) so the test needs no data files.
+    let sample_rate = 48000;
+    let channels = 2u32;
+    let sample_count = 48000 * 2; // 2 seconds -> ~94 blocks
+    let mut samples = Vec::with_capacity(sample_count * channels as usize);
+    for i in 0..sample_count {
+        let t = i as f32 / sample_rate as f32;
+        let sample = (2.0 * std::f32::consts::PI * (200.0 + 400.0 * t) * t).sin() * 0.5;
+        samples.push(sample);
+        samples.push(-sample * 0.7);
+    }
+    let config = HcaEncoderConfig {
+        channels,
+        sample_rate,
+        bitrate: 256_000,
+        ..Default::default()
+    };
+    let mut encoder = HcaEncoder::new(config).unwrap();
+    let mut hca_data = Vec::new();
+    encoder
+        .encode(&samples, &mut Cursor::new(&mut hca_data))
+        .unwrap();
+
+    let mut serial = Vec::new();
+    HcaDecoder::from_reader(Cursor::new(&hca_data))
+        .unwrap()
+        .decode_to_wav(&mut serial)
+        .unwrap();
+
+    for threads in [2, 4] {
+        let mut parallel = Vec::new();
+        HcaDecoder::from_reader(Cursor::new(&hca_data))
+            .unwrap()
+            .decode_to_wav_parallel(&mut parallel, threads)
+            .unwrap();
+        assert!(
+            serial == parallel,
+            "parallel ({threads} threads) output differs from serial"
+        );
+    }
+}
+
 /// Test HCA encoder with synthetic sine wave
 #[test]
 fn test_hca_encoder_roundtrip() {

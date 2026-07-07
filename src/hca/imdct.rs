@@ -232,13 +232,50 @@ unsafe fn imdct_transform_avx2(ch: &mut StChannel, subframe: usize) {
     imdct_body::<true>(ch, subframe);
 }
 
-#[inline(always)]
-fn imdct_body<const AVX2: bool>(ch: &mut StChannel, subframe: usize) {
-    // The IMDCT operates on fixed 128-sample buffers. The stage schedule below
-    // only indexes within those arrays.
-    let spectra = ch.spectra[subframe].as_mut_ptr();
-    let temp = ch.temp.as_mut_ptr();
+/// DCT stages only (no overlap-add), leaving the DCT-IV result in
+/// `ch.spectra[subframe]`. Used by the block-parallel decode path, where the
+/// serial overlap-add runs later via `imdct_overlap`.
+pub(crate) fn imdct_dct(ch: &mut StChannel, subframe: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe { imdct_dct_avx2(ch, subframe) }
+        } else {
+            dct_stages::<false>(ch.spectra[subframe].as_mut_ptr(), ch.temp.as_mut_ptr())
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    dct_stages::<false>(ch.spectra[subframe].as_mut_ptr(), ch.temp.as_mut_ptr());
+}
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn imdct_dct_avx2(ch: &mut StChannel, subframe: usize) {
+    dct_stages::<true>(ch.spectra[subframe].as_mut_ptr(), ch.temp.as_mut_ptr());
+}
+
+/// Overlap-add window on standalone 128-sample slices, bit-identical to the
+/// tail of `imdct_body`. `dct` is a DCT-IV output (from `imdct_dct`),
+/// `previous` carries the running overlap state, `wave` receives the samples.
+pub(crate) fn imdct_overlap(
+    dct: &[f32; HCA_SAMPLES_PER_SUBFRAME],
+    previous: &mut [f32; HCA_SAMPLES_PER_SUBFRAME],
+    wave: &mut [f32; HCA_SAMPLES_PER_SUBFRAME],
+) {
+    let window = &IMDCT_WINDOW;
+    for i in 0..HALF {
+        wave[i] = window[i] * dct[i + HALF] + previous[i];
+        wave[i + HALF] =
+            window[i + HALF] * dct[HCA_SAMPLES_PER_SUBFRAME - 1 - i] - previous[i + HALF];
+    }
+    for i in 0..HALF {
+        previous[i] = window[HCA_SAMPLES_PER_SUBFRAME - 1 - i] * dct[HALF - i - 1];
+        previous[i + HALF] = window[HALF - i - 1] * dct[i];
+    }
+}
+
+#[inline(always)]
+fn dct_stages<const AVX2: bool>(spectra: *mut f32, temp: *mut f32) {
     butterfly_stage::<1, 64, false, AVX2>(spectra, temp);
     butterfly_stage::<2, 32, true, AVX2>(spectra, temp);
     butterfly_stage::<4, 16, false, AVX2>(spectra, temp);
@@ -254,6 +291,16 @@ fn imdct_body<const AVX2: bool>(ch: &mut StChannel, subframe: usize) {
     dct_stage::<4, 4, 16, true, AVX2>(spectra, temp);
     dct_stage::<5, 2, 32, false, AVX2>(spectra, temp);
     dct_stage::<6, 1, 64, true, AVX2>(spectra, temp);
+}
+
+#[inline(always)]
+fn imdct_body<const AVX2: bool>(ch: &mut StChannel, subframe: usize) {
+    // The IMDCT operates on fixed 128-sample buffers. The stage schedule
+    // only indexes within those arrays.
+    let spectra = ch.spectra[subframe].as_mut_ptr();
+    let temp = ch.temp.as_mut_ptr();
+
+    dct_stages::<AVX2>(spectra, temp);
 
     // Update output/IMDCT with overlapped window
     let wave = ch.wave[subframe].as_mut_ptr();

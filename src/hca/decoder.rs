@@ -246,6 +246,7 @@ const DEQ_USED_BASE: [u8; 16] = [0, 1, 2, 2, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 10, 1
 const DEQ_USED_THRESH: [u8; 16] = [1, 2, 6, 2, 14, 10, 6, 2, 2, 2, 2, 2, 2, 2, 2, 2];
 
 /// Main HCA decoder structure
+#[derive(Clone)]
 pub struct ClHca {
     is_valid: bool,
 
@@ -982,6 +983,59 @@ impl ClHca {
         Ok(())
     }
 
+    /// True when blocks can be decoded independently of each other. Only
+    /// files with `min_resolution == 0` (HCA v3 noise reconstruction) carry
+    /// cross-block state, the sequential `random` LCG.
+    pub fn is_block_parallelizable(&self) -> bool {
+        self.is_valid && self.min_resolution > 0
+    }
+
+    /// Decode one block up to (and including) the DCT stages, without the
+    /// sequential overlap-add, writing the per-channel per-subframe DCT-IV
+    /// output into `out` (layout `[channel][subframe][sample]`, so
+    /// `channels * 8 * 128` f32). Combined with `imdct_overlap` this splits a
+    /// block decode into an independent parallel part and a cheap serial part.
+    ///
+    /// Errors on files where `is_block_parallelizable()` is false.
+    pub fn decode_block_dct(&mut self, data: &mut [u8], out: &mut [f32]) -> Result<(), HcaError> {
+        if !self.is_block_parallelizable() {
+            return Err(HcaError::InvalidParams);
+        }
+        let channels = self.channels as usize;
+        if out.len() < channels * HCA_SAMPLES_PER_FRAME {
+            return Err(HcaError::InvalidParams);
+        }
+
+        self.decode_block_unpack(data)?;
+
+        // Mirrors decode_block_transform, minus reconstruct_noise (a no-op
+        // when min_resolution > 0) and minus the overlap-add.
+        let full = self.bands_per_hfr_group != 0 || self.stereo_band_count != 0;
+        for subframe in 0..HCA_SUBFRAMES {
+            if full {
+                for ch in 0..channels {
+                    self.reconstruct_high_frequency(ch, subframe);
+                }
+                if self.stereo_band_count > 0 {
+                    for ch in 0..channels.saturating_sub(1) {
+                        self.apply_intensity_stereo(ch, subframe);
+                        self.apply_ms_stereo(ch, subframe);
+                    }
+                }
+            }
+            for (ch, chunk) in out
+                .chunks_exact_mut(HCA_SAMPLES_PER_FRAME)
+                .enumerate()
+                .take(channels)
+            {
+                crate::hca::imdct::imdct_dct(&mut self.channel[ch], subframe);
+                chunk[subframe * HCA_SAMPLES_PER_SUBFRAME..(subframe + 1) * HCA_SAMPLES_PER_SUBFRAME]
+                    .copy_from_slice(&self.channel[ch].spectra[subframe]);
+            }
+        }
+        Ok(())
+    }
+
     fn decode_block_unpack(&mut self, data: &mut [u8]) -> Result<usize, HcaError> {
         if !self.is_valid {
             return Err(HcaError::InvalidParams);
@@ -1454,7 +1508,7 @@ impl ClHca {
 }
 
 #[inline]
-fn pcm_f32_to_i16(sample: f32) -> i16 {
+pub(crate) fn pcm_f32_to_i16(sample: f32) -> i16 {
     const SCALE_F: f32 = 32768.0;
     let scaled = (sample * SCALE_F) as i32;
     scaled.clamp(-32768, 32767) as i16
